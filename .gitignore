@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Generated files
+kline_chart.png
+trend_graph.png
+record.csv
+*.png
+*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# Project specific
+ICLR2026_QuantAgent (18).pdf
+pdf_content.txt
+read.html
+read_files/
+app/
+static/
+
+# Data
+data/
+*.db
+*.sqlite
+
+# Logs
+*.log

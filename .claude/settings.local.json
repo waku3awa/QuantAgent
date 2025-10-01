@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__serena__list_dir",
+      "Bash(gemini:*)",
+      "mcp__gpt-5__o3-search",
+      "Bash(python test:*)",
+      "Bash(python.exe:*)",
+      "Bash(source:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
