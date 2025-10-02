@@ -6,7 +6,7 @@ import json
 import re
 from datetime import datetime, timedelta, date
 from typing import Dict, Any, Optional
-import yfinance as yf
+import yfinance_cache as yfc
 import base64
 import io
 from PIL import Image
@@ -83,7 +83,7 @@ class WebTradingAnalyzer:
             yf_symbol = self.yfinance_symbols.get(symbol, symbol)
             yf_interval = self.yfinance_intervals.get(interval, interval)
 
-            df = yf.download(tickers=yf_symbol, start=start_date, end=end_date, interval=yf_interval)
+            df = yfc.download(tickers=yf_symbol, start=start_date, end=end_date, interval=yf_interval)
 
             if df is None or df.empty:
                 return pd.DataFrame()
@@ -141,8 +141,8 @@ class WebTradingAnalyzer:
 
             print(f"Fetching {yf_symbol} from {start_datetime} to {end_datetime} with interval {yf_interval}")
 
-            # Use datetime objects directly for yfinance
-            df = yf.download(
+            # Use datetime objects directly for yfinance_cache
+            df = yfc.download(
                 tickers=yf_symbol,
                 start=start_datetime,
                 end=end_datetime,

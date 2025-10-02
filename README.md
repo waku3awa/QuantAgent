@@ -207,7 +207,7 @@ trading_graph = TradingGraph(config=config)
 final_state = trading_graph.graph.invoke(initial_state)
 ```
 
-For live data, we recommend using the web interface as it provides access to real-time market data through yfinance. The system automatically fetches the most recent 30 candlesticks for optimal LLM analysis accuracy.
+For live data, we recommend using the web interface as it provides access to real-time market data through yfinance_cache. The system automatically fetches the most recent 30 candlesticks for optimal LLM analysis accuracy.
 
 ### Configuration Options
 
@@ -247,7 +247,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 🙏 Acknowledgements
 
-This repository was built off of [**LangGraph**](https://github.com/langchain-ai/langgraph), [**OpenAI**](https://github.com/openai/openai-python), [**yfinance**](https://github.com/ranaroussi/yfinance), [**Flask**](https://github.com/pallets/flask), [**TechnicalAnalysisAutomation**](https://github.com/neurotrader888/TechnicalAnalysisAutomation/tree/main) and [**tvdatafeed**](https://github.com/rongardF/tvdatafeed).
+This repository was built off of [**LangGraph**](https://github.com/langchain-ai/langgraph), [**OpenAI**](https://github.com/openai/openai-python), [**yfinance_cache**](https://github.com/dpguthrie/yfinance-cache), [**Flask**](https://github.com/pallets/flask), [**TechnicalAnalysisAutomation**](https://github.com/neurotrader888/TechnicalAnalysisAutomation/tree/main) and [**tvdatafeed**](https://github.com/rongardF/tvdatafeed).
 
 ## ⚠️ Disclaimer
 

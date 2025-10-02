@@ -1,13 +1,12 @@
 """
 QuantAgent CLI Script
-Fetches stock data using yfinance and runs TradingGraph analysis.
+Fetches stock data using yfinance_cache and runs TradingGraph analysis.
 """
 import argparse
 import sys
-from datetime import datetime, timedelta
 from typing import Optional, List
 import pandas as pd
-import yfinance as yf
+import yfinance_cache as yfc
 from trading_graph import TradingGraph
 from agent_state import IndicatorAgentState
 from langchain_core.messages import BaseMessage
@@ -38,7 +37,7 @@ def fetch_stock_data(
 
         # Fetch data
         if period:
-            df = yf.download(
+            df = yfc.download(
                 tickers=ticker,
                 period=period,
                 interval=interval,
@@ -46,7 +45,7 @@ def fetch_stock_data(
                 prepost=False
             )
         else:
-            df = yf.download(
+            df = yfc.download(
                 tickers=ticker,
                 start=start_date,
                 end=end_date,
