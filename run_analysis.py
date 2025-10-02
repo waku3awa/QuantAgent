@@ -5,10 +5,12 @@ Fetches stock data using yfinance and runs TradingGraph analysis.
 import argparse
 import sys
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 import pandas as pd
 import yfinance as yf
 from trading_graph import TradingGraph
+from agent_state import IndicatorAgentState
+from langchain_core.messages import BaseMessage
 
 
 def fetch_stock_data(
@@ -175,11 +177,12 @@ def run_analysis(ticker: str, interval: str, data_dict: dict) -> dict:
     """
     print("\nRunning analysis...")
 
-    # Create initial state
-    initial_state = {
+    # Create initial state with explicit type
+    messages: List[BaseMessage] = []
+    initial_state: IndicatorAgentState = {
         "kline_data": data_dict,
         "analysis_results": None,
-        "messages": [],
+        "messages": messages,
         "time_frame": format_timeframe_display(interval),
         "stock_name": ticker
     }
