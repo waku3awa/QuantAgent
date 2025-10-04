@@ -36,12 +36,13 @@ def fetch_stock_data(
         print(f"Fetching data for {ticker}...")
 
         # Fetch data
+        # Note: yfinance_cache handles caching and session management
+        # threads=False is not available in yfc.download, but caching reduces API calls
         if period:
             df = yfc.download(
                 tickers=ticker,
                 period=period,
                 interval=interval,
-                auto_adjust=True,
                 prepost=False
             )
         else:
@@ -50,11 +51,11 @@ def fetch_stock_data(
                 start=start_date,
                 end=end_date,
                 interval=interval,
-                auto_adjust=True,
                 prepost=False
             )
 
-        if df is None or df.empty:
+        # Type guard for Pylance: yfc.download returns DataFrame | None
+        if not isinstance(df, pd.DataFrame) or df.empty:
             raise ValueError(f"No data returned for {ticker}")
 
         # Ensure df is a DataFrame
