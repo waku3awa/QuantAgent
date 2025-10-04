@@ -1,0 +1,24 @@
+[project]
+name = "quantagent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "flask>=3.1.2",
+    "ipython>=9.6.0",
+    "langchain>=0.3.27",
+    "langchain-core>=0.3.78",
+    "langchain-openai>=0.3.34",
+    "langgraph>=0.6.8",
+    "matplotlib>=3.10.6",
+    "mplfinance>=0.12.10b0",
+    "numpy>=2.3.3",
+    "openai>=2.1.0",
+    "pandas>=2.3.3",
+    "pillow>=11.3.0",
+    "requests>=2.32.5",
+    "scipy>=1.16.2",
+    "ta-lib>=0.6.7",
+    "yfinance-cache>=0.7.13",
+]
