@@ -25,6 +25,10 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import pandas as pd
 import requests
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from run_analysis import (
     fetch_stock_data,

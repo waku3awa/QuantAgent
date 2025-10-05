@@ -7,9 +7,13 @@ import sys
 from typing import Optional, List
 import pandas as pd
 import yfinance_cache as yfc
+from dotenv import load_dotenv
 from trading_graph import TradingGraph
 from agent_state import IndicatorAgentState
 from langchain_core.messages import BaseMessage
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 def fetch_stock_data(
