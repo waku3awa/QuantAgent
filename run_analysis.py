@@ -163,7 +163,14 @@ def format_timeframe_display(interval: str) -> str:
     return interval
 
 
-def run_analysis(ticker: str, interval: str, data_dict: dict) -> dict:
+def run_analysis(
+    ticker: str,
+    interval: str,
+    data_dict: dict,
+    provider: str = "openai",
+    agent_model: Optional[str] = None,
+    graph_model: Optional[str] = None
+) -> dict:
     """
     Run TradingGraph analysis.
 
@@ -171,11 +178,14 @@ def run_analysis(ticker: str, interval: str, data_dict: dict) -> dict:
         ticker: Ticker symbol
         interval: Time interval
         data_dict: Dictionary with kline data
+        provider: LLM provider ("openai", "claude_api", "claude_cli")
+        agent_model: Model name for agent LLMs (optional)
+        graph_model: Model name for graph LLM (optional)
 
     Returns:
         Analysis results
     """
-    print("\nRunning analysis...")
+    print(f"\nRunning analysis with provider: {provider}...")
 
     # Create initial state with explicit type
     messages: List[BaseMessage] = []
@@ -187,8 +197,12 @@ def run_analysis(ticker: str, interval: str, data_dict: dict) -> dict:
         "stock_name": ticker
     }
 
-    # Initialize TradingGraph
-    trading_graph = TradingGraph()
+    # Initialize TradingGraph with selected provider
+    trading_graph = TradingGraph(
+        provider=provider,
+        agent_model=agent_model,
+        graph_model=graph_model
+    )
 
     # Run analysis
     try:
@@ -244,20 +258,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Analyze Apple stock with 1-year daily data
+  # Analyze Apple stock with 1-year daily data (default: OpenAI)
   python run_analysis.py AAPL --period 1y --interval 1d
 
-  # Analyze Bitcoin with 6-month 4-hour data
-  python run_analysis.py BTC-USD --period 6mo --interval 4h
+  # Analyze Bitcoin with Claude CLI
+  python run_analysis.py BTC-USD --period 6mo --interval 4h --provider claude_cli
 
-  # Analyze Tesla with specific date range
-  python run_analysis.py TSLA --start 2024-01-01 --end 2024-12-31 --interval 1d
+  # Analyze Tesla with Claude API and specific models
+  python run_analysis.py TSLA --provider claude_api --agent-model claude-3-5-sonnet-20241022
 
-  # Analyze S&P 500 index
-  python run_analysis.py ^GSPC --period 3mo --interval 1d
+  # Analyze S&P 500 with custom OpenAI models
+  python run_analysis.py ^GSPC --provider openai --agent-model gpt-4o-mini --graph-model gpt-4o
 
 Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
 Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+Supported providers: openai (default), claude_api, claude_cli
         """
     )
 
@@ -304,6 +319,27 @@ Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
         help="Number of most recent data points to analyze (default: 45)"
     )
 
+    # LLM Provider settings
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="openai",
+        choices=["openai", "claude_api", "claude_cli"],
+        help="LLM provider to use (default: openai)"
+    )
+
+    parser.add_argument(
+        "--agent-model",
+        type=str,
+        help="Model name for agent LLMs (optional, uses provider default)"
+    )
+
+    parser.add_argument(
+        "--graph-model",
+        type=str,
+        help="Model name for graph LLM (optional, uses provider default)"
+    )
+
     args = parser.parse_args()
 
     # Validate date range arguments
@@ -330,8 +366,15 @@ Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
     # Prepare data for analysis
     data_dict = prepare_data_for_analysis(df, limit=args.limit)
 
-    # Run analysis
-    final_state = run_analysis(args.ticker, args.interval, data_dict)
+    # Run analysis with provider settings
+    final_state = run_analysis(
+        ticker=args.ticker,
+        interval=args.interval,
+        data_dict=data_dict,
+        provider=args.provider,
+        agent_model=args.agent_model,
+        graph_model=args.graph_model
+    )
 
     # Print results
     print_results(final_state)

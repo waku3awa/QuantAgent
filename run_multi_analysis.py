@@ -233,7 +233,10 @@ def process_single_ticker(
     start_date: Optional[str],
     end_date: Optional[str],
     limit: int,
-    max_retries: int = 7
+    max_retries: int = 7,
+    provider: str = "openai",
+    agent_model: Optional[str] = None,
+    graph_model: Optional[str] = None
 ) -> TickerResult:
     """
     Process a single ticker with advanced retry mechanism.
@@ -246,6 +249,9 @@ def process_single_ticker(
         end_date: End date in YYYY-MM-DD format
         limit: Number of most recent data points to analyze
         max_retries: Maximum number of retry attempts (default: 7)
+        provider: LLM provider ("openai", "claude_api", "claude_cli")
+        agent_model: Model name for agent LLMs (optional)
+        graph_model: Model name for graph LLM (optional)
 
     Returns:
         TickerResult object with analysis results or error information
@@ -286,8 +292,15 @@ def process_single_ticker(
             # Prepare data for analysis
             data_dict = prepare_data_for_analysis(df, limit=limit)
 
-            # Run analysis
-            final_state = run_analysis(ticker, interval, data_dict)
+            # Run analysis with provider settings
+            final_state = run_analysis(
+                ticker=ticker,
+                interval=interval,
+                data_dict=data_dict,
+                provider=provider,
+                agent_model=agent_model,
+                graph_model=graph_model
+            )
 
             # Extract results
             runtime = time.perf_counter() - start_time
@@ -528,17 +541,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Analyze multiple stocks with 1-year daily data (safe defaults)
+  # Analyze multiple stocks with 1-year daily data (default: OpenAI)
   python run_multi_analysis.py --tickers AAPL TSLA MSFT --period 1y --interval 1d
 
-  # Analyze crypto and stocks with 6-month 4-hour data
-  python run_multi_analysis.py --tickers BTC-USD ETH-USD AAPL --period 6mo --interval 4h
+  # Analyze with Claude CLI
+  python run_multi_analysis.py --tickers BTC-USD ETH-USD --provider claude_cli --period 6mo
 
-  # Analyze with specific date range and save results
-  python run_multi_analysis.py --tickers AAPL GOOGL --start 2024-01-01 --end 2024-12-31 --output results.json
+  # Analyze with Claude API and save results
+  python run_multi_analysis.py --tickers AAPL GOOGL --provider claude_api --output results.json
 
-  # View detailed analysis for each ticker
-  python run_multi_analysis.py --tickers AAPL TSLA --period 3mo --detailed
+  # View detailed analysis with custom models
+  python run_multi_analysis.py --tickers AAPL TSLA --provider openai --agent-model gpt-4o-mini --detailed
 
 Rate Limiting Notes:
   - Default max-workers=1 (sequential processing) minimizes 429 errors
@@ -548,6 +561,7 @@ Rate Limiting Notes:
 
 Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
 Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
+Supported providers: openai (default), claude_api, claude_cli
         """
     )
 
@@ -630,6 +644,27 @@ Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
         help="Print detailed analysis results for each ticker"
     )
 
+    # LLM Provider settings
+    parser.add_argument(
+        "--provider",
+        type=str,
+        default="openai",
+        choices=["openai", "claude_api", "claude_cli"],
+        help="LLM provider to use (default: openai)"
+    )
+
+    parser.add_argument(
+        "--agent-model",
+        type=str,
+        help="Model name for agent LLMs (optional, uses provider default)"
+    )
+
+    parser.add_argument(
+        "--graph-model",
+        type=str,
+        help="Model name for graph LLM (optional, uses provider default)"
+    )
+
     args = parser.parse_args()
 
     # Validate date range arguments
@@ -651,6 +686,7 @@ Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
         parser.error("No valid tickers provided")
 
     print(f"\nStarting analysis for {len(tickers)} ticker(s): {', '.join(tickers)}")
+    print(f"Provider: {args.provider}")
     print(f"Max workers: {args.max_workers}")
     print(f"Max retries per ticker: {args.max_retries}")
 
@@ -669,7 +705,10 @@ Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
                 start_date=args.start,
                 end_date=args.end,
                 limit=args.limit,
-                max_retries=args.max_retries
+                max_retries=args.max_retries,
+                provider=args.provider,
+                agent_model=args.agent_model,
+                graph_model=args.graph_model
             ): ticker
             for ticker in tickers
         }

@@ -510,3 +510,122 @@ if __name__ == "__main__":
             print(f"Tool result: {result}")
         except Exception as e:
             print(f"Error: {e}")
+
+
+# LangChain BaseChatModel Integration
+if LANGCHAIN_AVAILABLE:
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
+    from langchain_core.outputs import ChatResult, ChatGeneration
+    from pydantic import Field
+
+    class ChatClaudeCLI(BaseChatModel):
+        """
+        LangChain BaseChatModel implementation for Claude CLI.
+
+        This allows using Claude CLI as a drop-in replacement for ChatOpenAI
+        or other LangChain chat models.
+
+        Example:
+            >>> from claude_cli_wrapper import ChatClaudeCLI
+            >>> llm = ChatClaudeCLI(temperature=0.7)
+            >>> response = llm.invoke("Hello, Claude!")
+            >>> print(response.content)
+        """
+
+        client: ClaudeCLIClient = Field(default_factory=ClaudeCLIClient)
+        temperature: float = Field(default=0.1)
+        timeout: float = Field(default=60.0)
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _generate(
+            self,
+            messages: list[BaseMessage],
+            stop: Optional[list[str]] = None,
+            **kwargs
+        ) -> ChatResult:
+            """
+            Generate a response from Claude CLI.
+
+            Args:
+                messages: List of messages in the conversation
+                stop: Optional list of stop sequences
+                **kwargs: Additional arguments
+
+            Returns:
+                ChatResult with the generated response
+            """
+            # Convert messages to a single prompt string
+            prompt = self._messages_to_prompt(messages)
+
+            try:
+                # Call Claude CLI
+                response_text = self.client.run(
+                    prompt,
+                    timeout=kwargs.get("timeout", self.timeout),
+                    flags=["-p"]
+                )
+
+                # Create AIMessage with the response
+                message = AIMessage(content=response_text)
+                generation = ChatGeneration(message=message)
+
+                return ChatResult(generations=[generation])
+
+            except CLIError as e:
+                # Return error as AI message
+                error_message = AIMessage(content=f"Error: {e}")
+                generation = ChatGeneration(message=error_message)
+                return ChatResult(generations=[generation])
+
+        async def _agenerate(
+            self,
+            messages: list[BaseMessage],
+            stop: Optional[list[str]] = None,
+            **kwargs
+        ) -> ChatResult:
+            """
+            Async version of _generate.
+
+            Note: Currently calls the sync version as Claude CLI doesn't support async.
+            """
+            return self._generate(messages, stop, **kwargs)
+
+        def _messages_to_prompt(self, messages: list[BaseMessage]) -> str:
+            """
+            Convert LangChain messages to a prompt string for Claude CLI.
+
+            Args:
+                messages: List of LangChain messages
+
+            Returns:
+                Formatted prompt string
+            """
+            prompt_parts = []
+
+            for message in messages:
+                if isinstance(message, SystemMessage):
+                    prompt_parts.append(f"System: {message.content}")
+                elif isinstance(message, HumanMessage):
+                    prompt_parts.append(f"Human: {message.content}")
+                elif isinstance(message, AIMessage):
+                    prompt_parts.append(f"Assistant: {message.content}")
+                else:
+                    prompt_parts.append(f"{message.type}: {message.content}")
+
+            return "\n\n".join(prompt_parts)
+
+        @property
+        def _llm_type(self) -> str:
+            """Return the type of LLM."""
+            return "chat_claude_cli"
+
+        @property
+        def _identifying_params(self) -> dict:
+            """Return identifying parameters."""
+            return {
+                "temperature": self.temperature,
+                "timeout": self.timeout,
+            }
