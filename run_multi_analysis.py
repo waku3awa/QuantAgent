@@ -477,16 +477,15 @@ def print_detailed_results(results: List[TickerResult]):
         print("\n" + "="*80)
 
 
-def save_results_json(results: List[TickerResult], output_file: str):
+def save_results_json(results: List[TickerResult], output_path: Path):
     """
     Save results to JSON file.
 
     Args:
         results: List of TickerResult objects
-        output_file: Output file path
+        output_path: Output file Path object
     """
     # Create parent directories if they don't exist
-    output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     data = [asdict(r) for r in results]
@@ -494,19 +493,18 @@ def save_results_json(results: List[TickerResult], output_file: str):
     with output_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    print(f"\nResults saved to: {output_file}")
+    print(f"\nResults saved to: {output_path}")
 
 
-def save_results_csv(results: List[TickerResult], output_file: str):
+def save_results_csv(results: List[TickerResult], output_path: Path):
     """
     Save results to CSV file.
 
     Args:
         results: List of TickerResult objects
-        output_file: Output file path
+        output_path: Output file Path object
     """
     # Create parent directories if they don't exist
-    output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open('w', newline='', encoding='utf-8') as f:
@@ -531,7 +529,7 @@ def save_results_csv(results: List[TickerResult], output_file: str):
                 r.trend_report or ''
             ])
 
-    print(f"\nResults saved to: {output_file}")
+    print(f"\nResults saved to: {output_path}")
 
 
 def load_tickers_from_csv(file_path: str) -> List[str]:
@@ -727,14 +725,15 @@ Supported providers: openai (default), claude_api, claude_cli
     parser.add_argument(
         "--output",
         type=str,
-        help="Output file path (e.g., results.json or results.csv)"
+        help="Output file path or directory. If directory is specified, saves as 'quant_agent_result_YYYYMMDD_HHMMSS.{format}' (e.g., results.json or results.csv or ./output_dir/)"
     )
 
     parser.add_argument(
         "--output-format",
         type=str,
+        default="csv",
         choices=["json", "csv"],
-        help="Output format (default: inferred from file extension)"
+        help="Output format (default: csv). Used when --output specifies a directory or has no extension."
     )
 
     parser.add_argument(
@@ -838,21 +837,38 @@ Supported providers: openai (default), claude_api, claude_cli
 
     # Save results to file if requested
     if args.output:
-        # Infer format from file extension if not specified
-        output_format = args.output_format
-        if not output_format:
-            if args.output.endswith('.json'):
-                output_format = 'json'
-            elif args.output.endswith('.csv'):
-                output_format = 'csv'
+        output_path = Path(args.output)
+
+        # Determine if output is a directory or file
+        if output_path.is_dir():
+            # Directory: generate timestamped filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"quant_agent_result_{timestamp}.{args.output_format}"
+            final_output_path = output_path / filename
+            output_format = args.output_format
+        else:
+            # File path: infer format from extension if not explicitly set
+            final_output_path = output_path
+
+            # Infer format from file extension if --output-format not explicitly provided by user
+            # Check if user explicitly set --output-format (not just the default)
+            if args.output_format == "csv" and not any(arg.startswith("--output-format") for arg in sys.argv):
+                # User didn't explicitly set --output-format, so infer from extension
+                if output_path.suffix.lower() == '.json':
+                    output_format = 'json'
+                elif output_path.suffix.lower() == '.csv':
+                    output_format = 'csv'
+                else:
+                    # No recognizable extension, use default
+                    output_format = args.output_format
             else:
-                print("\n⚠ Warning: Could not infer output format from file extension. Using JSON.")
-                output_format = 'json'
+                # User explicitly set --output-format, use it
+                output_format = args.output_format
 
         if output_format == 'json':
-            save_results_json(results, args.output)
+            save_results_json(results, final_output_path)
         else:
-            save_results_csv(results, args.output)
+            save_results_csv(results, final_output_path)
 
     # Exit with error code if any ticker failed
     failed_count = sum(1 for r in results if r.status == "error")
