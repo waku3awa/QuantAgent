@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
+from pathlib import Path
 import pandas as pd
 import requests
 
@@ -471,9 +472,13 @@ def save_results_json(results: List[TickerResult], output_file: str):
         results: List of TickerResult objects
         output_file: Output file path
     """
+    # Create parent directories if they don't exist
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     data = [asdict(r) for r in results]
 
-    with open(output_file, 'w', encoding='utf-8') as f:
+    with output_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     print(f"\nResults saved to: {output_file}")
@@ -487,7 +492,11 @@ def save_results_csv(results: List[TickerResult], output_file: str):
         results: List of TickerResult objects
         output_file: Output file path
     """
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
+    # Create parent directories if they don't exist
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open('w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
 
         # Header
