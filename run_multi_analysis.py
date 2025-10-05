@@ -534,6 +534,97 @@ def save_results_csv(results: List[TickerResult], output_file: str):
     print(f"\nResults saved to: {output_file}")
 
 
+def load_tickers_from_csv(file_path: str) -> List[str]:
+    """
+    Load tickers from CSV file filtering by signal column.
+
+    Args:
+        file_path: Path to CSV file
+
+    Returns:
+        List of ticker symbols where シグナル is "買い" or "売り"
+
+    CSV Format:
+        ティッカー,銘柄名,シグナル,現在価格,100株価格,200日MA,MA比率(%),割高,割安,2日変動率(%),エラー
+    """
+    csv_path = Path(file_path)
+    if not csv_path.exists():
+        print(f"\n✗ Error: CSV file not found: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    tickers = []
+    seen = set()
+
+    # Try UTF-8 first, then CP932 (Shift_JIS for Japanese Windows)
+    encodings = ['utf-8-sig', 'utf-8', 'cp932', 'shift_jis']
+    last_error = None
+
+    for encoding in encodings:
+        try:
+            with csv_path.open(mode='r', encoding=encoding, newline='') as f:
+                reader = csv.DictReader(f)
+
+                # Normalize headers (strip BOM and whitespace)
+                if reader.fieldnames:
+                    normalized_headers = {h.strip().replace('\ufeff', ''): h for h in reader.fieldnames}
+                else:
+                    print(f"\n✗ Error: CSV file has no headers: {file_path}", file=sys.stderr)
+                    sys.exit(1)
+
+                # Check required columns
+                required_cols = ['ティッカー', 'シグナル']
+                missing = [col for col in required_cols if col not in normalized_headers]
+                if missing:
+                    print(f"\n✗ Error: CSV missing required columns: {missing}", file=sys.stderr)
+                    print(f"Found columns: {list(normalized_headers.keys())}", file=sys.stderr)
+                    sys.exit(1)
+
+                ticker_col = normalized_headers['ティッカー']
+                signal_col = normalized_headers['シグナル']
+                # 銘柄名 is optional
+                name_col = normalized_headers.get('銘柄名')
+
+                # Parse rows
+                row_num = 1
+                for row in reader:
+                    row_num += 1
+                    try:
+                        signal = row.get(signal_col, '').strip()
+                        ticker_raw = row.get(ticker_col, '').strip()
+                        name = row.get(name_col, '').strip() if name_col else ''
+
+                        # Filter by signal
+                        if signal in ('買い', '売り'):
+                            ticker = ticker_raw.upper()
+                            if ticker and ticker not in seen:
+                                tickers.append(ticker)
+                                seen.add(ticker)
+                                # Display ticker with name if available
+                                if name:
+                                    print(f"  Row {row_num}: {ticker} - {name} (signal: {signal})")
+                                else:
+                                    print(f"  Row {row_num}: {ticker} (signal: {signal})")
+                    except Exception as e:
+                        print(f"⚠ Warning: Skipping malformed row {row_num}: {e}", file=sys.stderr)
+                        continue
+
+            # Success - exit encoding loop
+            print(f"\n✓ Loaded {len(tickers)} ticker(s) from CSV (encoding: {encoding})")
+            return tickers
+
+        except UnicodeDecodeError as e:
+            last_error = e
+            continue
+        except Exception as e:
+            print(f"\n✗ Error reading CSV file: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    # All encodings failed
+    print(f"\n✗ Error: Could not decode CSV file with any encoding: {encodings}", file=sys.stderr)
+    print(f"Last error: {last_error}", file=sys.stderr)
+    sys.exit(1)
+
+
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(
@@ -553,6 +644,9 @@ Examples:
   # View detailed analysis with custom models
   python run_multi_analysis.py --tickers AAPL TSLA --provider openai --agent-model gpt-4o-mini --detailed
 
+  # Analyze from CSV file (filters by シグナル column: "買い" or "売り")
+  python run_multi_analysis.py --csv-file signals.csv --period 1y --interval 1d
+
 Rate Limiting Notes:
   - Default max-workers=1 (sequential processing) minimizes 429 errors
   - Global rate limiter enforces 2s min spacing + 20 requests/minute cap
@@ -565,12 +659,17 @@ Supported providers: openai (default), claude_api, claude_cli
         """
     )
 
-    # Required arguments
-    parser.add_argument(
+    # Ticker input: mutually exclusive (either --tickers or --csv-file)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "--tickers",
         nargs="+",
-        required=True,
         help="Ticker symbols (e.g., AAPL TSLA BTC-USD ^GSPC)"
+    )
+    input_group.add_argument(
+        "--csv-file",
+        type=str,
+        help='Path to CSV file with "ティッカー" and "シグナル" columns. Only tickers with シグナル="買い" or "売り" will be analyzed.'
     )
 
     # Optional arguments
@@ -673,17 +772,22 @@ Supported providers: openai (default), claude_api, claude_cli
     if args.end and not args.start:
         parser.error("--end requires --start")
 
-    # Remove duplicates and empty strings from tickers
+    # Load tickers from CSV file or command line
     tickers = []
-    seen = set()
-    for ticker in args.tickers:
-        ticker = ticker.strip().upper()
-        if ticker and ticker not in seen:
-            tickers.append(ticker)
-            seen.add(ticker)
+    if args.csv_file:
+        print(f"\nLoading tickers from CSV file: {args.csv_file}")
+        tickers = load_tickers_from_csv(args.csv_file)
+    elif args.tickers:
+        # Remove duplicates and empty strings from tickers
+        seen = set()
+        for ticker in args.tickers:
+            ticker = ticker.strip().upper()
+            if ticker and ticker not in seen:
+                tickers.append(ticker)
+                seen.add(ticker)
 
     if not tickers:
-        parser.error("No valid tickers provided")
+        parser.error("No valid tickers to analyze. Check your input source (CSV or --tickers).")
 
     print(f"\nStarting analysis for {len(tickers)} ticker(s): {', '.join(tickers)}")
     print(f"Provider: {args.provider}")

@@ -18,6 +18,7 @@ trend_graph.png
 record.csv
 *.png
 *.csv
+*.json
 
 # IDE
 .vscode/
