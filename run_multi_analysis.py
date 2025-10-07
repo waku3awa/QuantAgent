@@ -17,7 +17,9 @@ import csv
 import random
 import threading
 import email.utils as email_utils
-from typing import Optional, List, Dict, Any
+import re
+import logging
+from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from dotenv import load_dotenv
+import yfinance as yf
 
 # Load environment variables from .env file
 load_dotenv()
@@ -112,6 +115,13 @@ _shared_session = None
 _inflight_requests = {}
 _inflight_lock = threading.Lock()
 
+# Ticker name cache for yfinance lookups
+_ticker_name_cache = {}
+_ticker_name_lock = threading.Lock()
+
+# Regex for extracting JSON from markdown code blocks
+_fenced_json_re = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+
 
 def get_shared_session() -> requests.Session:
     """Get or create shared requests.Session with proper headers."""
@@ -165,6 +175,115 @@ def deduplicate_request(key: str, fetch_fn):
         event.wait()
         # Leader has completed - call fetch_fn again (should hit cache now)
         return fetch_fn()
+
+
+def extract_json_from_markdown(text: str) -> Optional[str]:
+    """
+    Extract JSON content from markdown code blocks.
+
+    Args:
+        text: Text containing JSON (potentially in ```json...``` blocks)
+
+    Returns:
+        Extracted JSON string, or None if no JSON found
+    """
+    if not text:
+        return None
+
+    # Try fenced code block first
+    match = _fenced_json_re.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: find balanced JSON object
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth, in_str, esc = 0, False, False
+    for i, ch in enumerate(text[start:], start):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i+1].strip()
+    return None
+
+
+def parse_final_trade_decision(raw_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Parse Final Trade Decision field to extract structured data.
+
+    Args:
+        raw_text: Raw text containing JSON (potentially in markdown code blocks)
+
+    Returns:
+        Tuple of (parsed_dict, error_message)
+        - parsed_dict: Dict with keys: forecast_horizon, decision, justification, risk_reward_ratio
+        - error_message: Error message if parsing failed, None otherwise
+    """
+    snippet = extract_json_from_markdown(raw_text or "")
+    if not snippet:
+        return None, "no_json_found"
+
+    try:
+        data = json.loads(snippet)
+        # Validate required keys
+        required_keys = ["forecast_horizon", "decision", "justification", "risk_reward_ratio"]
+        if not all(key in data for key in required_keys):
+            missing = [k for k in required_keys if k not in data]
+            return data, f"missing_keys: {', '.join(missing)}"
+        return data, None
+    except json.JSONDecodeError as e:
+        logging.warning(f"JSON parse failed: {e}; snippet: {snippet[:200]}")
+        return None, f"json_decode_error: {e.msg}"
+
+
+def get_ticker_name(ticker: str) -> str:
+    """
+    Get ticker name from yfinance with caching.
+
+    Args:
+        ticker: Ticker symbol
+
+    Returns:
+        Ticker name (longName or shortName), or ticker symbol if not found
+    """
+    ticker_upper = ticker.upper()
+
+    # Check cache first
+    with _ticker_name_lock:
+        if ticker_upper in _ticker_name_cache:
+            return _ticker_name_cache[ticker_upper]
+
+    # Fetch from yfinance
+    try:
+        ticker_obj = yf.Ticker(ticker_upper)
+        info = ticker_obj.info
+        name = info.get('longName') or info.get('shortName') or ticker_upper
+
+        # Cache result
+        with _ticker_name_lock:
+            _ticker_name_cache[ticker_upper] = name
+
+        return name
+    except Exception as e:
+        logging.warning(f"Could not fetch name for {ticker_upper}: {e}")
+        # Cache the ticker symbol itself to avoid repeated failures
+        with _ticker_name_lock:
+            _ticker_name_cache[ticker_upper] = ticker_upper
+        return ticker_upper
 
 
 @dataclass
@@ -481,18 +600,41 @@ def print_detailed_results(results: List[TickerResult]):
         print("\n" + "="*80)
 
 
-def save_results_json(results: List[TickerResult], output_path: Path):
+def save_results_json(results: List[TickerResult], output_path: Path, detailed: bool = False):
     """
     Save results to JSON file.
 
     Args:
         results: List of TickerResult objects
         output_path: Output file Path object
+        detailed: If True, save detailed format. If False, save simple format (default).
     """
     # Create parent directories if they don't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = [asdict(r) for r in results]
+    if detailed:
+        # Detailed format: save all fields
+        data = [asdict(r) for r in results]
+    else:
+        # Simple format: extract structured fields from Final Trade Decision
+        data = []
+        for r in results:
+            parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
+
+            simple_record = {
+                "ticker": r.ticker,
+                "name": get_ticker_name(r.ticker),
+                "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
+                "decision": parsed_data.get("decision") if parsed_data else None,
+                "justification": parsed_data.get("justification") if parsed_data else None,
+                "risk_reward_ratio": parsed_data.get("risk_reward_ratio") if parsed_data else None,
+            }
+
+            # Add parse error for failed cases (optional, for debugging)
+            if parse_error:
+                simple_record["parse_error"] = parse_error
+
+            data.append(simple_record)
 
     with output_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -500,40 +642,63 @@ def save_results_json(results: List[TickerResult], output_path: Path):
     print(f"\nResults saved to: {output_path}")
 
 
-def save_results_csv(results: List[TickerResult], output_path: Path):
+def save_results_csv(results: List[TickerResult], output_path: Path, append: bool = False, detailed: bool = False):
     """
     Save results to CSV file.
 
     Args:
         results: List of TickerResult objects
         output_path: Output file Path object
+        append: If True, append to existing file without header. If False, create new file with header.
+        detailed: If True, save detailed format. If False, save simple format (default).
     """
     # Create parent directories if they don't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open('w', newline='', encoding='utf-8') as f:
+    mode = 'a' if append else 'w'
+    with output_path.open(mode, newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
 
-        # Header
-        writer.writerow([
-            'Ticker', 'Status', 'Runtime (seconds)', 'Error Message',
-            'Final Trade Decision', 'Indicator Report', 'Pattern Report', 'Trend Report'
-        ])
+        if detailed:
+            # Detailed format: all fields
+            if not append:
+                writer.writerow([
+                    'Ticker', 'Status', 'Runtime (seconds)', 'Error Message',
+                    'Final Trade Decision', 'Indicator Report', 'Pattern Report', 'Trend Report'
+                ])
 
-        # Data rows
-        for r in results:
-            writer.writerow([
-                r.ticker,
-                r.status,
-                f"{r.runtime_seconds:.2f}",
-                r.error_message or '',
-                r.final_trade_decision or '',
-                r.indicator_report or '',
-                r.pattern_report or '',
-                r.trend_report or ''
-            ])
+            for r in results:
+                writer.writerow([
+                    r.ticker,
+                    r.status,
+                    f"{r.runtime_seconds:.2f}",
+                    r.error_message or '',
+                    r.final_trade_decision or '',
+                    r.indicator_report or '',
+                    r.pattern_report or '',
+                    r.trend_report or ''
+                ])
+        else:
+            # Simple format: extract structured fields from Final Trade Decision
+            if not append:
+                writer.writerow([
+                    'Ticker', 'name', 'forecast_horizon', 'decision', 'justification', 'risk_reward_ratio'
+                ])
 
-    print(f"\nResults saved to: {output_path}")
+            for r in results:
+                parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
+
+                writer.writerow([
+                    r.ticker,
+                    get_ticker_name(r.ticker),
+                    parsed_data.get("forecast_horizon") if parsed_data else '',
+                    parsed_data.get("decision") if parsed_data else '',
+                    parsed_data.get("justification") if parsed_data else '',
+                    parsed_data.get("risk_reward_ratio") if parsed_data else ''
+                ])
+
+    if not append:
+        print(f"\nResults saved to: {output_path}")
 
 
 def load_tickers_from_csv(file_path: str) -> List[str]:
@@ -746,6 +911,12 @@ Supported providers: openai (default), claude_api, claude_cli
         help="Print detailed analysis results for each ticker"
     )
 
+    parser.add_argument(
+        "--detailed-output",
+        action="store_true",
+        help="Save detailed format to output files (default: simple format with ticker, name, forecast_horizon, decision, justification, risk_reward_ratio)"
+    )
+
     # LLM Provider settings
     parser.add_argument(
         "--provider",
@@ -801,6 +972,38 @@ Supported providers: openai (default), claude_api, claude_cli
     results = []
     start_time = time.perf_counter()
 
+    # Determine output path and format early if output is requested
+    output_path = None
+    output_format = None
+    if args.output:
+        output_path_obj = Path(args.output)
+
+        # Determine if output is a directory or file
+        if output_path_obj.is_dir():
+            # Directory: generate timestamped filename
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"quant_agent_result_{timestamp}.{args.output_format}"
+            output_path = output_path_obj / filename
+            output_format = args.output_format
+        else:
+            # File path: infer format from extension if not explicitly set
+            output_path = output_path_obj
+
+            # Infer format from file extension if --output-format not explicitly provided by user
+            if args.output_format == "csv" and not any(arg.startswith("--output-format") for arg in sys.argv):
+                if output_path_obj.suffix.lower() == '.json':
+                    output_format = 'json'
+                elif output_path_obj.suffix.lower() == '.csv':
+                    output_format = 'csv'
+                else:
+                    output_format = args.output_format
+            else:
+                output_format = args.output_format
+
+        # Initialize CSV file with header if CSV format
+        if output_format == 'csv':
+            save_results_csv([], output_path, append=False, detailed=args.detailed_output)
+
     with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
         # Submit all tasks
         future_to_ticker = {
@@ -825,6 +1028,10 @@ Supported providers: openai (default), claude_api, claude_cli
             result = future.result()
             results.append(result)
 
+            # Immediately write to CSV if output is CSV format
+            if output_path and output_format == 'csv':
+                save_results_csv([result], output_path, append=True, detailed=args.detailed_output)
+
     # Sort results to match input order
     ticker_order = {t: i for i, t in enumerate(tickers)}
     results.sort(key=lambda r: ticker_order.get(r.ticker, 999))
@@ -841,38 +1048,12 @@ Supported providers: openai (default), claude_api, claude_cli
 
     # Save results to file if requested
     if args.output:
-        output_path = Path(args.output)
-
-        # Determine if output is a directory or file
-        if output_path.is_dir():
-            # Directory: generate timestamped filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"quant_agent_result_{timestamp}.{args.output_format}"
-            final_output_path = output_path / filename
-            output_format = args.output_format
-        else:
-            # File path: infer format from extension if not explicitly set
-            final_output_path = output_path
-
-            # Infer format from file extension if --output-format not explicitly provided by user
-            # Check if user explicitly set --output-format (not just the default)
-            if args.output_format == "csv" and not any(arg.startswith("--output-format") for arg in sys.argv):
-                # User didn't explicitly set --output-format, so infer from extension
-                if output_path.suffix.lower() == '.json':
-                    output_format = 'json'
-                elif output_path.suffix.lower() == '.csv':
-                    output_format = 'csv'
-                else:
-                    # No recognizable extension, use default
-                    output_format = args.output_format
-            else:
-                # User explicitly set --output-format, use it
-                output_format = args.output_format
-
+        # Only save JSON format here; CSV was already written incrementally
         if output_format == 'json':
-            save_results_json(results, final_output_path)
-        else:
-            save_results_csv(results, final_output_path)
+            save_results_json(results, output_path, detailed=args.detailed_output)
+        elif output_format == 'csv':
+            # CSV already written incrementally during processing
+            print(f"\nResults saved to: {output_path}")
 
     # Exit with error code if any ticker failed
     failed_count = sum(1 for r in results if r.status == "error")
