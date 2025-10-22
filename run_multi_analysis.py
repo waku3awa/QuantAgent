@@ -6,7 +6,7 @@ Rate Limit Avoidance Strategy (priority order):
 1. Cache thoroughly using yfinance_cache
 2. Space out requests with global rate limiter (min spacing + per-minute cap)
 3. Minimize parallelism (default max-workers=1)
-4. Exponential backoff with 429/Retry-After awareness
+4. Skip tickers on download failure (no retry)
 5. Stable User-Agent via shared requests.Session
 """
 import argparse
@@ -16,12 +16,11 @@ import json
 import csv
 import random
 import threading
-import email.utils as email_utils
 import re
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, timezone
+from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
@@ -349,7 +348,7 @@ def get_ticker_name(ticker: str) -> str:
 class TickerResult:
     """Result container for each ticker analysis."""
     ticker: str
-    status: str  # "success" | "error"
+    status: str  # "success" | "skipped" | "error"
     error_message: Optional[str]
     runtime_seconds: float
     final_trade_decision: Optional[str] = None
@@ -358,54 +357,6 @@ class TickerResult:
     trend_report: Optional[str] = None
 
 
-def parse_retry_after(header_value: Optional[str]) -> Optional[float]:
-    """
-    Parse Retry-After header value.
-
-    Args:
-        header_value: Value from Retry-After header (seconds or HTTP-date)
-
-    Returns:
-        Seconds to wait, or None if parsing failed
-    """
-    if not header_value:
-        return None
-
-    # Try parsing as integer (seconds)
-    try:
-        return max(0.0, float(header_value))
-    except ValueError:
-        pass
-
-    # Try parsing as HTTP-date
-    try:
-        dt = email_utils.parsedate_to_datetime(header_value)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        delta = (dt - datetime.now(timezone.utc)).total_seconds()
-        return max(0.0, delta)
-    except Exception:
-        return None
-
-
-def is_rate_limit_error(exception: Exception) -> bool:
-    """Check if exception indicates a rate limit error."""
-    error_str = str(exception).lower()
-    # Common rate limit indicators
-    return any(indicator in error_str for indicator in [
-        '429', 'too many requests', 'rate limit', 'quota exceeded',
-        '999', 'request denied'  # Yahoo specific
-    ])
-
-
-def is_transient_error(exception: Exception) -> bool:
-    """Check if exception indicates a transient error worth retrying."""
-    error_str = str(exception).lower()
-    # Transient errors: timeouts, server errors, connection issues
-    return any(indicator in error_str for indicator in [
-        'timeout', 'timed out', '502', '503', '504',
-        'connection', 'temporary', 'unavailable'
-    ])
 
 
 def process_single_ticker(
@@ -415,13 +366,12 @@ def process_single_ticker(
     start_date: Optional[str],
     end_date: Optional[str],
     limit: int,
-    max_retries: int = 7,
     provider: str = "openai",
     agent_model: Optional[str] = None,
     graph_model: Optional[str] = None
 ) -> TickerResult:
     """
-    Process a single ticker with advanced retry mechanism.
+    Process a single ticker without retry - skip on failure.
 
     Args:
         ticker: Ticker symbol
@@ -430,13 +380,12 @@ def process_single_ticker(
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
         limit: Number of most recent data points to analyze
-        max_retries: Maximum number of retry attempts (default: 7)
         provider: LLM provider ("openai", "claude_api", "claude_cli")
         agent_model: Model name for agent LLMs (optional)
         graph_model: Model name for graph LLM (optional)
 
     Returns:
-        TickerResult object with analysis results or error information
+        TickerResult object with analysis results or skip information
     """
     start_time = time.perf_counter()
 
@@ -444,123 +393,109 @@ def process_single_ticker(
     logging.info("Processing: %s", ticker)
     logging.info("%s", "="*80)
 
-    for attempt in range(max_retries):
-        try:
-            # Create unique key for this request (for de-duplication)
+    try:
+        # Create unique key for this request (for de-duplication)
+        if start_date and end_date:
+            request_key = f"{ticker}_{interval}_{start_date}_{end_date}"
+        else:
+            request_key = f"{ticker}_{interval}_{period}"
+
+        # Deduplicate and fetch data with rate limiting
+        def fetch_with_rate_limit():
+            _rate_limiter.wait()
             if start_date and end_date:
-                request_key = f"{ticker}_{interval}_{start_date}_{end_date}"
+                return fetch_stock_data(
+                    ticker=ticker,
+                    interval=interval,
+                    start_date=start_date,
+                    end_date=end_date
+                )
             else:
-                request_key = f"{ticker}_{interval}_{period}"
+                return fetch_stock_data(
+                    ticker=ticker,
+                    interval=interval,
+                    period=period
+                )
 
-            # Deduplicate and fetch data with rate limiting
-            def fetch_with_rate_limit():
-                _rate_limiter.wait()
-                if start_date and end_date:
-                    return fetch_stock_data(
-                        ticker=ticker,
-                        interval=interval,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                else:
-                    return fetch_stock_data(
-                        ticker=ticker,
-                        interval=interval,
-                        period=period
-                    )
+        df = deduplicate_request(request_key, fetch_with_rate_limit)
 
-            df = deduplicate_request(request_key, fetch_with_rate_limit)
-
-            # Prepare data for analysis
-            data_dict = prepare_data_for_analysis(df, limit=limit)
-
-            # Run analysis with provider settings
-            final_state = run_analysis(
-                ticker=ticker,
-                interval=interval,
-                data_dict=data_dict,
-                provider=provider,
-                agent_model=agent_model,
-                graph_model=graph_model
-            )
-
-            # Extract results
+        # Check for empty data (yfinance "soft fail")
+        if df is None or df.empty:
             runtime = time.perf_counter() - start_time
-
-            result = TickerResult(
+            error_msg = "No data returned from yfinance (empty DataFrame)"
+            logging.warning("⊘ %s: Skipped - %s (%.2fs)", ticker, error_msg, runtime)
+            return TickerResult(
                 ticker=ticker,
-                status="success",
-                error_message=None,
-                runtime_seconds=runtime,
-                final_trade_decision=final_state.get("final_trade_decision"),
-                indicator_report=final_state.get("indicator_report"),
-                pattern_report=final_state.get("pattern_report"),
-                trend_report=final_state.get("trend_report")
+                status="skipped",
+                error_message=error_msg,
+                runtime_seconds=runtime
             )
 
-            logging.info("✓ %s: Analysis completed successfully (%.2fs)", ticker, runtime)
-            return result
+        # Check for missing required columns
+        if "Close" not in df.columns:
+            runtime = time.perf_counter() - start_time
+            error_msg = "Missing required 'Close' column in data"
+            logging.warning("⊘ %s: Skipped - %s (%.2fs)", ticker, error_msg, runtime)
+            return TickerResult(
+                ticker=ticker,
+                status="skipped",
+                error_message=error_msg,
+                runtime_seconds=runtime
+            )
 
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
-            is_rate_limit = is_rate_limit_error(e)
-            is_transient = is_transient_error(e)
+        # Check for all-NaN Close column
+        if df["Close"].dropna().empty:
+            runtime = time.perf_counter() - start_time
+            error_msg = "All-NaN Close column (no valid price data)"
+            logging.warning("⊘ %s: Skipped - %s (%.2fs)", ticker, error_msg, runtime)
+            return TickerResult(
+                ticker=ticker,
+                status="skipped",
+                error_message=error_msg,
+                runtime_seconds=runtime
+            )
 
-            # Don't retry on permanent client errors (4xx except 429)
-            if not is_rate_limit and not is_transient and '4' in str(type(e).__name__):
-                runtime = time.perf_counter() - start_time
-                logging.error("✗ %s: Permanent error (no retry): %s", ticker, error_msg)
-                return TickerResult(
-                    ticker=ticker,
-                    status="error",
-                    error_message=error_msg,
-                    runtime_seconds=runtime
-                )
+        # Prepare data for analysis
+        data_dict = prepare_data_for_analysis(df, limit=limit)
 
-            if attempt < max_retries - 1:
-                # Calculate backoff time
-                if is_rate_limit:
-                    # For rate limits: longer backoff, exponential with cap at 120s
-                    base_wait = min(120.0, 2 ** (attempt + 3))  # 8, 16, 32, 64, 120, 120...
-                    jitter_range = base_wait * 0.5
-                    wait_time = base_wait + random.uniform(0, jitter_range)
+        # Run analysis with provider settings
+        final_state = run_analysis(
+            ticker=ticker,
+            interval=interval,
+            data_dict=data_dict,
+            provider=provider,
+            agent_model=agent_model,
+            graph_model=graph_model
+        )
 
-                    # Set global cooldown for all threads
-                    _rate_limiter.set_cooldown(wait_time)
+        # Extract results
+        runtime = time.perf_counter() - start_time
 
-                    logging.warning("⚠ %s: Rate limit hit (attempt %d/%d)", ticker, attempt + 1, max_retries)
-                    logging.warning("  Error: %s", error_msg)
-                    logging.warning("  Waiting %.1fs before retry...", wait_time)
-                else:
-                    # For transient errors: standard exponential backoff
-                    base_wait = min(60.0, 2 ** attempt)  # 1, 2, 4, 8, 16, 32, 60...
-                    jitter_range = base_wait * 0.5
-                    wait_time = base_wait + random.uniform(0, jitter_range)
+        result = TickerResult(
+            ticker=ticker,
+            status="success",
+            error_message=None,
+            runtime_seconds=runtime,
+            final_trade_decision=final_state.get("final_trade_decision"),
+            indicator_report=final_state.get("indicator_report"),
+            pattern_report=final_state.get("pattern_report"),
+            trend_report=final_state.get("trend_report")
+        )
 
-                    logging.warning("⚠ %s: Transient error (attempt %d/%d)", ticker, attempt + 1, max_retries)
-                    logging.warning("  Error: %s", error_msg)
-                    logging.warning("  Retrying in %.1fs...", wait_time)
+        logging.info("✓ %s: Analysis completed successfully (%.2fs)", ticker, runtime)
+        return result
 
-                time.sleep(wait_time)
-            else:
-                runtime = time.perf_counter() - start_time
-                logging.error("✗ %s: Analysis failed after %d attempts: %s", ticker, max_retries, error_msg)
+    except Exception as e:
+        runtime = time.perf_counter() - start_time
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logging.warning("⊘ %s: Skipped due to error - %s (%.2fs)", ticker, error_msg, runtime)
 
-                return TickerResult(
-                    ticker=ticker,
-                    status="error",
-                    error_message=error_msg,
-                    runtime_seconds=runtime
-                )
-
-    # This should not be reached, but handle it just in case
-    runtime = time.perf_counter() - start_time
-    return TickerResult(
-        ticker=ticker,
-        status="error",
-        error_message="Unknown error: max retries exhausted",
-        runtime_seconds=runtime
-    )
+        return TickerResult(
+            ticker=ticker,
+            status="skipped",
+            error_message=error_msg,
+            runtime_seconds=runtime
+        )
 
 
 def print_summary(results: List[TickerResult]):
@@ -575,10 +510,12 @@ def print_summary(results: List[TickerResult]):
     logging.info("%s", "="*80)
 
     successful = [r for r in results if r.status == "success"]
+    skipped = [r for r in results if r.status == "skipped"]
     failed = [r for r in results if r.status == "error"]
 
     logging.info("\nTotal Tickers: %d", len(results))
     logging.info("✓ Successful: %d", len(successful))
+    logging.info("⊘ Skipped: %d", len(skipped))
     logging.info("✗ Failed: %d", len(failed))
 
     if successful:
@@ -592,11 +529,17 @@ def print_summary(results: List[TickerResult]):
 
     # Print each result
     for result in results:
-        status_icon = "✓" if result.status == "success" else "✗"
+        if result.status == "success":
+            status_icon = "✓"
+        elif result.status == "skipped":
+            status_icon = "⊘"
+        else:
+            status_icon = "✗"
+
         runtime_str = f"{result.runtime_seconds:.2f}s"
         notes = ""
 
-        if result.status == "error":
+        if result.status in ("skipped", "error"):
             # Type-safe truncation: coalesce None first
             msg = result.error_message or ""
             notes = msg[:47] + "..." if len(msg) > 50 else msg
@@ -606,6 +549,14 @@ def print_summary(results: List[TickerResult]):
             notes = first_line[:47] + "..." if len(first_line) > 50 else first_line
 
         logging.info("%-10s %s %-8s %-12s %s", result.ticker, status_icon, result.status, runtime_str, notes)
+
+    if skipped:
+        logging.info("\n%s", "="*80)
+        logging.info("SKIPPED TICKERS DETAILS")
+        logging.info("%s", "="*80)
+        for result in skipped:
+            logging.info("\n%s:", result.ticker)
+            logging.info("  Reason: %s", result.error_message)
 
     if failed:
         logging.info("\n%s", "="*80)
@@ -678,20 +629,35 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
         # Simple format: extract structured fields from Final Trade Decision
         data = []
         for r in results:
-            parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
+            if r.status == "skipped":
+                # Skipped ticker: only include basic info and error message
+                simple_record = {
+                    "ticker": r.ticker,
+                    "status": r.status,
+                    "name": get_ticker_name(r.ticker),
+                    "error_message": r.error_message
+                }
+            else:
+                # Success or error: parse decision data
+                parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
 
-            simple_record = {
-                "ticker": r.ticker,
-                "name": get_ticker_name(r.ticker),
-                "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
-                "decision": parsed_data.get("decision") if parsed_data else None,
-                "justification": parsed_data.get("justification") if parsed_data else None,
-                "risk_reward_ratio": parsed_data.get("risk_reward_ratio") if parsed_data else None,
-            }
+                simple_record = {
+                    "ticker": r.ticker,
+                    "status": r.status,
+                    "name": get_ticker_name(r.ticker),
+                    "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
+                    "decision": parsed_data.get("decision") if parsed_data else None,
+                    "justification": parsed_data.get("justification") if parsed_data else None,
+                    "risk_reward_ratio": parsed_data.get("risk_reward_ratio") if parsed_data else None,
+                }
 
-            # Add parse error for failed cases (optional, for debugging)
-            if parse_error:
-                simple_record["parse_error"] = parse_error
+                # Add error message if present
+                if r.error_message:
+                    simple_record["error_message"] = r.error_message
+
+                # Add parse error for failed cases (optional, for debugging)
+                if parse_error:
+                    simple_record["parse_error"] = parse_error
 
             data.append(simple_record)
 
@@ -741,20 +707,36 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
             # Simple format: extract structured fields from Final Trade Decision
             if not append:
                 writer.writerow([
-                    'Ticker', 'name', 'forecast_horizon', 'decision', 'justification', 'risk_reward_ratio'
+                    'Ticker', 'Status', 'Name', 'Forecast Horizon', 'Decision', 'Justification', 'Risk/Reward Ratio', 'Error Message'
                 ])
 
             for r in results:
-                parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
+                if r.status == "skipped":
+                    # Skipped ticker: only populate ticker, status, and error message
+                    writer.writerow([
+                        r.ticker,
+                        r.status,
+                        get_ticker_name(r.ticker),
+                        '',  # forecast_horizon
+                        '',  # decision
+                        '',  # justification
+                        '',  # risk_reward_ratio
+                        r.error_message or ''
+                    ])
+                else:
+                    # Success or error: parse decision data
+                    parsed_data, parse_error = parse_final_trade_decision(r.final_trade_decision or "")
 
-                writer.writerow([
-                    r.ticker,
-                    get_ticker_name(r.ticker),
-                    parsed_data.get("forecast_horizon") if parsed_data else '',
-                    parsed_data.get("decision") if parsed_data else '',
-                    parsed_data.get("justification") if parsed_data else '',
-                    parsed_data.get("risk_reward_ratio") if parsed_data else ''
-                ])
+                    writer.writerow([
+                        r.ticker,
+                        r.status,
+                        get_ticker_name(r.ticker),
+                        parsed_data.get("forecast_horizon") if parsed_data else '',
+                        parsed_data.get("decision") if parsed_data else '',
+                        parsed_data.get("justification") if parsed_data else '',
+                        parsed_data.get("risk_reward_ratio") if parsed_data else '',
+                        r.error_message or ''
+                    ])
 
     if not append:
         logging.info("Results saved to: %s", output_path)
@@ -876,7 +858,8 @@ Examples:
 Rate Limiting Notes:
   - Default max-workers=1 (sequential processing) minimizes 429 errors
   - Global rate limiter enforces 2s min spacing + 20 requests/minute cap
-  - Automatic exponential backoff on rate limit errors (up to 120s)
+  - Failed data downloads will skip that ticker (no retry)
+  - Skipped tickers are recorded in output with error message
   - yfinance_cache provides persistent caching to reduce API calls
 
 Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
@@ -942,12 +925,6 @@ Supported providers: openai (default), claude_api, claude_cli
         help="Maximum number of concurrent workers (default: 1, recommended to avoid rate limits). WARNING: Higher values increase risk of 429 errors."
     )
 
-    parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=7,
-        help="Maximum number of retry attempts for failed tickers (default: 7)"
-    )
 
     # Output settings
     parser.add_argument(
@@ -1028,7 +1005,6 @@ Supported providers: openai (default), claude_api, claude_cli
     logging.info("Starting analysis for %d ticker(s): %s", len(tickers), ', '.join(tickers))
     logging.info("Provider: %s", args.provider)
     logging.info("Max workers: %d", args.max_workers)
-    logging.info("Max retries per ticker: %d", args.max_retries)
 
     # Process tickers concurrently
     results = []
@@ -1077,7 +1053,6 @@ Supported providers: openai (default), claude_api, claude_cli
                 start_date=args.start,
                 end_date=args.end,
                 limit=args.limit,
-                max_retries=args.max_retries,
                 provider=args.provider,
                 agent_model=args.agent_model,
                 graph_model=args.graph_model
@@ -1117,9 +1092,9 @@ Supported providers: openai (default), claude_api, claude_cli
             # CSV already written incrementally during processing
             logging.info("Results saved to: %s", output_path)
 
-    # Exit with error code if any ticker failed
-    failed_count = sum(1 for r in results if r.status == "error")
-    if failed_count > 0:
+    # Exit with error code if any ticker failed or was skipped
+    failed_or_skipped_count = sum(1 for r in results if r.status in ("error", "skipped"))
+    if failed_or_skipped_count > 0:
         sys.exit(1)
 
 
