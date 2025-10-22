@@ -19,6 +19,7 @@ import threading
 import email.utils as email_utils
 import re
 import logging
+from logging.handlers import RotatingFileHandler
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime, timezone
 from collections import deque
@@ -32,6 +33,64 @@ import yfinance as yf
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def configure_logging(
+    log_file: Optional[Path] = None,
+    console_level: int = logging.INFO,
+    file_level: int = logging.DEBUG,
+    max_bytes: int = 10 * 1024 * 1024,  # 10 MB
+    backup_count: int = 5,
+) -> None:
+    """
+    Configure root logger with RotatingFileHandler and StreamHandler.
+
+    Args:
+        log_file: Path to log file (default: multi_analysis.log in current directory)
+        console_level: Minimum log level for console output (default: INFO)
+        file_level: Minimum log level for file output (default: DEBUG)
+        max_bytes: Maximum log file size before rotation (default: 10MB)
+        backup_count: Number of backup files to keep (default: 5)
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    # Avoid duplicating handlers
+    if getattr(root, "_configured", False):
+        return
+
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Console handler: INFO+
+    console_handler = logging.StreamHandler(stream=sys.stdout)
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(formatter)
+    root.addHandler(console_handler)
+
+    # File handler: DEBUG+ with rotation
+    if log_file is None:
+        log_file = Path("multi_analysis.log")
+
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8"
+    )
+    file_handler.setLevel(file_level)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    # Quiet down noisy third-party libraries
+    logging.captureWarnings(True)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("yfinance").setLevel(logging.WARNING)
+
+    root._configured = True
 
 from run_analysis import (
     fetch_stock_data,
@@ -72,7 +131,7 @@ class YahooRateLimiter:
             # Global cooldown (after 429 error)
             if now < self.cooldown_until:
                 wait_time = self.cooldown_until - now
-                print(f"⏸ Rate limit cooldown: waiting {wait_time:.1f}s...")
+                logging.info("⏸ Rate limit cooldown: waiting %.1fs...", wait_time)
                 time.sleep(wait_time)
                 now = time.monotonic()
 
@@ -84,7 +143,7 @@ class YahooRateLimiter:
             if len(self.calls) >= self.per_minute:
                 sleep_for = 60 - (now - self.calls[0])
                 if sleep_for > 0:
-                    print(f"⏸ Per-minute limit reached: waiting {sleep_for:.1f}s...")
+                    logging.info("⏸ Per-minute limit reached: waiting %.1fs...", sleep_for)
                     time.sleep(sleep_for)
                     now = time.monotonic()
 
@@ -102,7 +161,7 @@ class YahooRateLimiter:
         """Set global cooldown period (e.g., after 429 error)."""
         with self.lock:
             self.cooldown_until = max(self.cooldown_until, time.monotonic() + seconds)
-            print(f"⚠ Setting cooldown for {seconds:.1f}s due to rate limit")
+            logging.warning("⚠ Setting cooldown for %.1fs due to rate limit", seconds)
 
 
 # Global rate limiter instance
@@ -381,9 +440,9 @@ def process_single_ticker(
     """
     start_time = time.perf_counter()
 
-    print(f"\n{'='*80}")
-    print(f"Processing: {ticker}")
-    print(f"{'='*80}")
+    logging.info("%s", "="*80)
+    logging.info("Processing: %s", ticker)
+    logging.info("%s", "="*80)
 
     for attempt in range(max_retries):
         try:
@@ -439,7 +498,7 @@ def process_single_ticker(
                 trend_report=final_state.get("trend_report")
             )
 
-            print(f"\n✓ {ticker}: Analysis completed successfully ({runtime:.2f}s)")
+            logging.info("✓ %s: Analysis completed successfully (%.2fs)", ticker, runtime)
             return result
 
         except Exception as e:
@@ -450,7 +509,7 @@ def process_single_ticker(
             # Don't retry on permanent client errors (4xx except 429)
             if not is_rate_limit and not is_transient and '4' in str(type(e).__name__):
                 runtime = time.perf_counter() - start_time
-                print(f"\n✗ {ticker}: Permanent error (no retry): {error_msg}")
+                logging.error("✗ %s: Permanent error (no retry): %s", ticker, error_msg)
                 return TickerResult(
                     ticker=ticker,
                     status="error",
@@ -469,23 +528,23 @@ def process_single_ticker(
                     # Set global cooldown for all threads
                     _rate_limiter.set_cooldown(wait_time)
 
-                    print(f"⚠ {ticker}: Rate limit hit (attempt {attempt + 1}/{max_retries})")
-                    print(f"  Error: {error_msg}")
-                    print(f"  Waiting {wait_time:.1f}s before retry...")
+                    logging.warning("⚠ %s: Rate limit hit (attempt %d/%d)", ticker, attempt + 1, max_retries)
+                    logging.warning("  Error: %s", error_msg)
+                    logging.warning("  Waiting %.1fs before retry...", wait_time)
                 else:
                     # For transient errors: standard exponential backoff
                     base_wait = min(60.0, 2 ** attempt)  # 1, 2, 4, 8, 16, 32, 60...
                     jitter_range = base_wait * 0.5
                     wait_time = base_wait + random.uniform(0, jitter_range)
 
-                    print(f"⚠ {ticker}: Transient error (attempt {attempt + 1}/{max_retries})")
-                    print(f"  Error: {error_msg}")
-                    print(f"  Retrying in {wait_time:.1f}s...")
+                    logging.warning("⚠ %s: Transient error (attempt %d/%d)", ticker, attempt + 1, max_retries)
+                    logging.warning("  Error: %s", error_msg)
+                    logging.warning("  Retrying in %.1fs...", wait_time)
 
                 time.sleep(wait_time)
             else:
                 runtime = time.perf_counter() - start_time
-                print(f"\n✗ {ticker}: Analysis failed after {max_retries} attempts: {error_msg}")
+                logging.error("✗ %s: Analysis failed after %d attempts: %s", ticker, max_retries, error_msg)
 
                 return TickerResult(
                     ticker=ticker,
@@ -511,25 +570,25 @@ def print_summary(results: List[TickerResult]):
     Args:
         results: List of TickerResult objects
     """
-    print("\n" + "="*80)
-    print("MULTI-TICKER ANALYSIS SUMMARY")
-    print("="*80)
+    logging.info("\n%s", "="*80)
+    logging.info("MULTI-TICKER ANALYSIS SUMMARY")
+    logging.info("%s", "="*80)
 
     successful = [r for r in results if r.status == "success"]
     failed = [r for r in results if r.status == "error"]
 
-    print(f"\nTotal Tickers: {len(results)}")
-    print(f"✓ Successful: {len(successful)}")
-    print(f"✗ Failed: {len(failed)}")
+    logging.info("\nTotal Tickers: %d", len(results))
+    logging.info("✓ Successful: %d", len(successful))
+    logging.info("✗ Failed: %d", len(failed))
 
     if successful:
         total_time = sum(r.runtime_seconds for r in successful)
         avg_time = total_time / len(successful)
-        print(f"Average Runtime: {avg_time:.2f}s")
+        logging.info("Average Runtime: %.2fs", avg_time)
 
     # Print table header
-    print(f"\n{'Ticker':<10} {'Status':<10} {'Runtime':<12} {'Notes':<50}")
-    print("-" * 82)
+    logging.info("\n%-10s %-10s %-12s %-50s", "Ticker", "Status", "Runtime", "Notes")
+    logging.info("%s", "-" * 82)
 
     # Print each result
     for result in results:
@@ -546,17 +605,17 @@ def print_summary(results: List[TickerResult]):
             first_line = result.final_trade_decision.split('\n')[0]
             notes = first_line[:47] + "..." if len(first_line) > 50 else first_line
 
-        print(f"{result.ticker:<10} {status_icon} {result.status:<8} {runtime_str:<12} {notes}")
+        logging.info("%-10s %s %-8s %-12s %s", result.ticker, status_icon, result.status, runtime_str, notes)
 
     if failed:
-        print("\n" + "="*80)
-        print("FAILED TICKERS DETAILS")
-        print("="*80)
+        logging.info("\n%s", "="*80)
+        logging.info("FAILED TICKERS DETAILS")
+        logging.info("%s", "="*80)
         for result in failed:
-            print(f"\n{result.ticker}:")
-            print(f"  Error: {result.error_message}")
+            logging.info("\n%s:", result.ticker)
+            logging.info("  Error: %s", result.error_message)
 
-    print("\n" + "="*80)
+    logging.info("\n%s", "="*80)
 
 
 def print_detailed_results(results: List[TickerResult]):
@@ -569,35 +628,35 @@ def print_detailed_results(results: List[TickerResult]):
     successful = [r for r in results if r.status == "success"]
 
     if not successful:
-        print("\nNo successful analyses to display.")
+        logging.info("\nNo successful analyses to display.")
         return
 
     for result in successful:
-        print("\n" + "="*80)
-        print(f"DETAILED RESULTS: {result.ticker}")
-        print("="*80)
+        logging.info("\n%s", "="*80)
+        logging.info("DETAILED RESULTS: %s", result.ticker)
+        logging.info("%s", "="*80)
 
         if result.final_trade_decision:
-            print("\n📊 FINAL TRADE DECISION:")
-            print("-" * 80)
-            print(result.final_trade_decision)
+            logging.info("\n📊 FINAL TRADE DECISION:")
+            logging.info("%s", "-" * 80)
+            logging.info("%s", result.final_trade_decision)
 
         if result.indicator_report:
-            print("\n📈 INDICATOR ANALYSIS:")
-            print("-" * 80)
-            print(result.indicator_report)
+            logging.info("\n📈 INDICATOR ANALYSIS:")
+            logging.info("%s", "-" * 80)
+            logging.info("%s", result.indicator_report)
 
         if result.pattern_report:
-            print("\n🔍 PATTERN ANALYSIS:")
-            print("-" * 80)
-            print(result.pattern_report)
+            logging.info("\n🔍 PATTERN ANALYSIS:")
+            logging.info("%s", "-" * 80)
+            logging.info("%s", result.pattern_report)
 
         if result.trend_report:
-            print("\n📉 TREND ANALYSIS:")
-            print("-" * 80)
-            print(result.trend_report)
+            logging.info("\n📉 TREND ANALYSIS:")
+            logging.info("%s", "-" * 80)
+            logging.info("%s", result.trend_report)
 
-        print("\n" + "="*80)
+        logging.info("\n%s", "="*80)
 
 
 def save_results_json(results: List[TickerResult], output_path: Path, detailed: bool = False):
@@ -639,7 +698,7 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
     with output_path.open('w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    print(f"\nResults saved to: {output_path}")
+    logging.info("Results saved to: %s", output_path)
 
 
 def save_results_csv(results: List[TickerResult], output_path: Path, append: bool = False, detailed: bool = False):
@@ -698,7 +757,7 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
                 ])
 
     if not append:
-        print(f"\nResults saved to: {output_path}")
+        logging.info("Results saved to: %s", output_path)
 
 
 def load_tickers_from_csv(file_path: str) -> List[str]:
@@ -716,7 +775,7 @@ def load_tickers_from_csv(file_path: str) -> List[str]:
     """
     csv_path = Path(file_path)
     if not csv_path.exists():
-        print(f"\n✗ Error: CSV file not found: {file_path}", file=sys.stderr)
+        logging.error("✗ Error: CSV file not found: %s", file_path)
         sys.exit(1)
 
     tickers = []
@@ -735,15 +794,15 @@ def load_tickers_from_csv(file_path: str) -> List[str]:
                 if reader.fieldnames:
                     normalized_headers = {h.strip().replace('\ufeff', ''): h for h in reader.fieldnames}
                 else:
-                    print(f"\n✗ Error: CSV file has no headers: {file_path}", file=sys.stderr)
+                    logging.error("✗ Error: CSV file has no headers: %s", file_path)
                     sys.exit(1)
 
                 # Check required columns
                 required_cols = ['ティッカー', 'シグナル']
                 missing = [col for col in required_cols if col not in normalized_headers]
                 if missing:
-                    print(f"\n✗ Error: CSV missing required columns: {missing}", file=sys.stderr)
-                    print(f"Found columns: {list(normalized_headers.keys())}", file=sys.stderr)
+                    logging.error("✗ Error: CSV missing required columns: %s", missing)
+                    logging.error("Found columns: %s", list(normalized_headers.keys()))
                     sys.exit(1)
 
                 ticker_col = normalized_headers['ティッカー']
@@ -768,27 +827,27 @@ def load_tickers_from_csv(file_path: str) -> List[str]:
                                 seen.add(ticker)
                                 # Display ticker with name if available
                                 if name:
-                                    print(f"  Row {row_num}: {ticker} - {name} (signal: {signal})")
+                                    logging.info("  Row %d: %s - %s (signal: %s)", row_num, ticker, name, signal)
                                 else:
-                                    print(f"  Row {row_num}: {ticker} (signal: {signal})")
+                                    logging.info("  Row %d: %s (signal: %s)", row_num, ticker, signal)
                     except Exception as e:
-                        print(f"⚠ Warning: Skipping malformed row {row_num}: {e}", file=sys.stderr)
+                        logging.warning("⚠ Warning: Skipping malformed row %d: %s", row_num, e)
                         continue
 
             # Success - exit encoding loop
-            print(f"\n✓ Loaded {len(tickers)} ticker(s) from CSV (encoding: {encoding})")
+            logging.info("✓ Loaded %d ticker(s) from CSV (encoding: %s)", len(tickers), encoding)
             return tickers
 
         except UnicodeDecodeError as e:
             last_error = e
             continue
         except Exception as e:
-            print(f"\n✗ Error reading CSV file: {e}", file=sys.stderr)
+            logging.error("✗ Error reading CSV file: %s", e)
             sys.exit(1)
 
     # All encodings failed
-    print(f"\n✗ Error: Could not decode CSV file with any encoding: {encodings}", file=sys.stderr)
-    print(f"Last error: {last_error}", file=sys.stderr)
+    logging.error("✗ Error: Could not decode CSV file with any encoding: %s", encodings)
+    logging.error("Last error: %s", last_error)
     sys.exit(1)
 
 
@@ -946,10 +1005,13 @@ Supported providers: openai (default), claude_api, claude_cli
     if args.end and not args.start:
         parser.error("--end requires --start")
 
+    # Configure logging first
+    configure_logging()
+
     # Load tickers from CSV file or command line
     tickers = []
     if args.csv_file:
-        print(f"\nLoading tickers from CSV file: {args.csv_file}")
+        logging.info("Loading tickers from CSV file: %s", args.csv_file)
         tickers = load_tickers_from_csv(args.csv_file)
     elif args.tickers:
         # Remove duplicates and empty strings from tickers
@@ -963,10 +1025,10 @@ Supported providers: openai (default), claude_api, claude_cli
     if not tickers:
         parser.error("No valid tickers to analyze. Check your input source (CSV or --tickers).")
 
-    print(f"\nStarting analysis for {len(tickers)} ticker(s): {', '.join(tickers)}")
-    print(f"Provider: {args.provider}")
-    print(f"Max workers: {args.max_workers}")
-    print(f"Max retries per ticker: {args.max_retries}")
+    logging.info("Starting analysis for %d ticker(s): %s", len(tickers), ', '.join(tickers))
+    logging.info("Provider: %s", args.provider)
+    logging.info("Max workers: %d", args.max_workers)
+    logging.info("Max retries per ticker: %d", args.max_retries)
 
     # Process tickers concurrently
     results = []
@@ -1040,7 +1102,7 @@ Supported providers: openai (default), claude_api, claude_cli
 
     # Print summary
     print_summary(results)
-    print(f"\nTotal execution time: {total_time:.2f}s")
+    logging.info("Total execution time: %.2fs", total_time)
 
     # Print detailed results if requested
     if args.detailed:
@@ -1053,7 +1115,7 @@ Supported providers: openai (default), claude_api, claude_cli
             save_results_json(results, output_path, detailed=args.detailed_output)
         elif output_format == 'csv':
             # CSV already written incrementally during processing
-            print(f"\nResults saved to: {output_path}")
+            logging.info("Results saved to: %s", output_path)
 
     # Exit with error code if any ticker failed
     failed_count = sum(1 for r in results if r.status == "error")
