@@ -1,12 +1,12 @@
 """
 QuantAgent Multi-Ticker CLI Script
-Fetches stock data for multiple tickers using yfinance_cache with aggressive rate limiting.
+Fetches stock data for multiple tickers sequentially with simple rate limiting.
 
-Rate Limit Avoidance Strategy (priority order):
-1. Cache thoroughly using yfinance_cache
-2. Space out requests with global rate limiter (min spacing + per-minute cap)
-3. Minimize parallelism (default max-workers=1)
-4. Skip tickers on download failure (no retry)
+Processing Strategy:
+1. Sequential processing (one ticker at a time)
+2. Simple rate limiting (2 second minimum interval with jitter)
+3. Skip tickers on download failure (no retry)
+4. Cache thoroughly using yfinance
 5. Stable User-Agent via shared requests.Session
 """
 import argparse
@@ -15,14 +15,11 @@ import time
 import json
 import csv
 import random
-import threading
 import re
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import pandas as pd
@@ -100,82 +97,35 @@ from run_analysis import (
 )
 
 
-class YahooRateLimiter:
+# Simple rate limiting for sequential processing
+_last_request_time = 0.0
+_min_request_interval = 2.0  # Minimum seconds between requests
+
+
+def wait_for_rate_limit():
     """
-    Global rate limiter for Yahoo Finance API to avoid 429 errors.
-
-    Implements:
-    - Minimum spacing between requests (with jitter)
-    - Per-minute request cap
-    - Global cooldown on 429 errors
+    Simple rate limiter for sequential yfinance requests.
+    Enforces minimum interval between requests with jitter.
     """
-    def __init__(self, min_interval: float = 2.0, per_minute: int = 20):
-        """
-        Args:
-            min_interval: Minimum seconds between requests (default: 2.0s)
-            per_minute: Maximum requests per minute (default: 20)
-        """
-        self.min_interval = min_interval
-        self.per_minute = per_minute
-        self.lock = threading.Lock()
-        self.next_ok = 0.0
-        self.calls = deque()
-        self.cooldown_until = 0.0
+    global _last_request_time
 
-    def wait(self):
-        """Block until it's safe to make next request."""
-        with self.lock:
-            now = time.monotonic()
+    now = time.time()
+    elapsed = now - _last_request_time
 
-            # Global cooldown (after 429 error)
-            if now < self.cooldown_until:
-                wait_time = self.cooldown_until - now
-                logging.info("⏸ Rate limit cooldown: waiting %.1fs...", wait_time)
-                time.sleep(wait_time)
-                now = time.monotonic()
+    if elapsed < _min_request_interval:
+        # Add jitter (10-20% of interval) to avoid predictable patterns
+        jitter = random.uniform(0.1, 0.2) * _min_request_interval
+        wait_time = (_min_request_interval - elapsed) + jitter
+        logging.debug("⏸ Rate limit: waiting %.2fs before next request", wait_time)
+        time.sleep(wait_time)
 
-            # Per-minute window cleanup
-            while self.calls and now - self.calls[0] > 60:
-                self.calls.popleft()
-
-            # Enforce per-minute cap
-            if len(self.calls) >= self.per_minute:
-                sleep_for = 60 - (now - self.calls[0])
-                if sleep_for > 0:
-                    logging.info("⏸ Per-minute limit reached: waiting %.1fs...", sleep_for)
-                    time.sleep(sleep_for)
-                    now = time.monotonic()
-
-            # Min spacing with jitter
-            if now < self.next_ok:
-                time.sleep(self.next_ok - now)
-                now = time.monotonic()
-
-            # Add jitter to avoid lockstep requests
-            jitter = random.uniform(0.0, 0.5)
-            self.next_ok = now + self.min_interval + jitter
-            self.calls.append(time.monotonic())
-
-    def set_cooldown(self, seconds: float):
-        """Set global cooldown period (e.g., after 429 error)."""
-        with self.lock:
-            self.cooldown_until = max(self.cooldown_until, time.monotonic() + seconds)
-            logging.warning("⚠ Setting cooldown for %.1fs due to rate limit", seconds)
-
-
-# Global rate limiter instance
-_rate_limiter = YahooRateLimiter(min_interval=2.0, per_minute=20)
+    _last_request_time = time.time()
 
 # Global shared session with stable User-Agent
 _shared_session = None
 
-# Request de-duplication: avoid concurrent identical requests
-_inflight_requests = {}
-_inflight_lock = threading.Lock()
-
 # Ticker name cache for yfinance lookups
 _ticker_name_cache = {}
-_ticker_name_lock = threading.Lock()
 
 # Regex for extracting JSON from markdown code blocks
 _fenced_json_re = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
@@ -194,45 +144,6 @@ def get_shared_session() -> requests.Session:
     return _shared_session
 
 
-def deduplicate_request(key: str, fetch_fn):
-    """
-    Ensure only one thread fetches data for a given key at a time.
-    Other threads with the same key will wait for the first request to complete.
-
-    Args:
-        key: Unique identifier for the request (e.g., "AAPL_1d_3mo")
-        fetch_fn: Function to call if this is the first request for this key
-
-    Returns:
-        Result from fetch_fn
-    """
-    with _inflight_lock:
-        event = _inflight_requests.get(key)
-        if event is None:
-            # First request for this key - create event and mark as leader
-            event = threading.Event()
-            _inflight_requests[key] = event
-            is_leader = True
-        else:
-            # Another thread is already fetching this - wait for it
-            is_leader = False
-
-    if is_leader:
-        try:
-            # Leader performs the actual fetch
-            result = fetch_fn()
-            # Store result for potential future use (in cache)
-            return result
-        finally:
-            # Signal waiting threads and cleanup
-            with _inflight_lock:
-                event.set()
-                _inflight_requests.pop(key, None)
-    else:
-        # Wait for leader to complete
-        event.wait()
-        # Leader has completed - call fetch_fn again (should hit cache now)
-        return fetch_fn()
 
 
 def extract_json_from_markdown(text: str) -> Optional[str]:
@@ -321,9 +232,8 @@ def get_ticker_name(ticker: str) -> str:
     ticker_upper = ticker.upper()
 
     # Check cache first
-    with _ticker_name_lock:
-        if ticker_upper in _ticker_name_cache:
-            return _ticker_name_cache[ticker_upper]
+    if ticker_upper in _ticker_name_cache:
+        return _ticker_name_cache[ticker_upper]
 
     # Fetch from yfinance
     try:
@@ -332,15 +242,13 @@ def get_ticker_name(ticker: str) -> str:
         name = info.get('longName') or info.get('shortName') or ticker_upper
 
         # Cache result
-        with _ticker_name_lock:
-            _ticker_name_cache[ticker_upper] = name
+        _ticker_name_cache[ticker_upper] = name
 
         return name
     except Exception as e:
         logging.warning(f"Could not fetch name for {ticker_upper}: {e}")
         # Cache the ticker symbol itself to avoid repeated failures
-        with _ticker_name_lock:
-            _ticker_name_cache[ticker_upper] = ticker_upper
+        _ticker_name_cache[ticker_upper] = ticker_upper
         return ticker_upper
 
 
@@ -394,30 +302,21 @@ def process_single_ticker(
     logging.info("%s", "="*80)
 
     try:
-        # Create unique key for this request (for de-duplication)
+        # Fetch data with rate limiting
+        wait_for_rate_limit()
         if start_date and end_date:
-            request_key = f"{ticker}_{interval}_{start_date}_{end_date}"
+            df = fetch_stock_data(
+                ticker=ticker,
+                interval=interval,
+                start_date=start_date,
+                end_date=end_date
+            )
         else:
-            request_key = f"{ticker}_{interval}_{period}"
-
-        # Deduplicate and fetch data with rate limiting
-        def fetch_with_rate_limit():
-            _rate_limiter.wait()
-            if start_date and end_date:
-                return fetch_stock_data(
-                    ticker=ticker,
-                    interval=interval,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-            else:
-                return fetch_stock_data(
-                    ticker=ticker,
-                    interval=interval,
-                    period=period
-                )
-
-        df = deduplicate_request(request_key, fetch_with_rate_limit)
+            df = fetch_stock_data(
+                ticker=ticker,
+                interval=interval,
+                period=period
+            )
 
         # Check for empty data (yfinance "soft fail")
         if df is None or df.empty:
@@ -855,12 +754,12 @@ Examples:
   # Analyze from CSV file (filters by シグナル column: "買い" or "売り")
   python run_multi_analysis.py --csv-file signals.csv --period 1y --interval 1d
 
-Rate Limiting Notes:
-  - Default max-workers=1 (sequential processing) minimizes 429 errors
-  - Global rate limiter enforces 2s min spacing + 20 requests/minute cap
+Processing Notes:
+  - Tickers are processed sequentially (one at a time)
+  - Simple rate limiting: 2 second minimum interval with 10-20% jitter
   - Failed data downloads will skip that ticker (no retry)
   - Skipped tickers are recorded in output with error message
-  - yfinance_cache provides persistent caching to reduce API calls
+  - yfinance caching reduces redundant API calls
 
 Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
 Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
@@ -916,15 +815,6 @@ Supported providers: openai (default), claude_api, claude_cli
         default=45,
         help="Number of most recent data points to analyze (default: 45)"
     )
-
-    # Concurrency settings
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=1,
-        help="Maximum number of concurrent workers (default: 1, recommended to avoid rate limits). WARNING: Higher values increase risk of 429 errors."
-    )
-
 
     # Output settings
     parser.add_argument(
@@ -1004,9 +894,9 @@ Supported providers: openai (default), claude_api, claude_cli
 
     logging.info("Starting analysis for %d ticker(s): %s", len(tickers), ', '.join(tickers))
     logging.info("Provider: %s", args.provider)
-    logging.info("Max workers: %d", args.max_workers)
+    logging.info("Processing mode: Sequential")
 
-    # Process tickers concurrently
+    # Process tickers sequentially
     results = []
     start_time = time.perf_counter()
 
@@ -1042,36 +932,24 @@ Supported providers: openai (default), claude_api, claude_cli
         if output_format == 'csv':
             save_results_csv([], output_path, append=False, detailed=args.detailed_output)
 
-    with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        # Submit all tasks
-        future_to_ticker = {
-            executor.submit(
-                process_single_ticker,
-                ticker=ticker,
-                interval=args.interval,
-                period=args.period if not args.start else None,
-                start_date=args.start,
-                end_date=args.end,
-                limit=args.limit,
-                provider=args.provider,
-                agent_model=args.agent_model,
-                graph_model=args.graph_model
-            ): ticker
-            for ticker in tickers
-        }
+    # Process tickers sequentially
+    for ticker in tickers:
+        result = process_single_ticker(
+            ticker=ticker,
+            interval=args.interval,
+            period=args.period if not args.start else None,
+            start_date=args.start,
+            end_date=args.end,
+            limit=args.limit,
+            provider=args.provider,
+            agent_model=args.agent_model,
+            graph_model=args.graph_model
+        )
+        results.append(result)
 
-        # Collect results as they complete
-        for future in as_completed(future_to_ticker):
-            result = future.result()
-            results.append(result)
-
-            # Immediately write to CSV if output is CSV format
-            if output_path and output_format == 'csv':
-                save_results_csv([result], output_path, append=True, detailed=args.detailed_output)
-
-    # Sort results to match input order
-    ticker_order = {t: i for i, t in enumerate(tickers)}
-    results.sort(key=lambda r: ticker_order.get(r.ticker, 999))
+        # Immediately write to CSV if output is CSV format
+        if output_path and output_format == 'csv':
+            save_results_csv([result], output_path, append=True, detailed=args.detailed_output)
 
     total_time = time.perf_counter() - start_time
 
