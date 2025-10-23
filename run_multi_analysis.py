@@ -404,7 +404,7 @@ def print_summary(results: List[TickerResult]):
     Args:
         results: List of TickerResult objects
     """
-    logging.info("\n%s", "="*80)
+    logging.info("%s", "="*80)
     logging.info("MULTI-TICKER ANALYSIS SUMMARY")
     logging.info("%s", "="*80)
 
@@ -412,7 +412,7 @@ def print_summary(results: List[TickerResult]):
     skipped = [r for r in results if r.status == "skipped"]
     failed = [r for r in results if r.status == "error"]
 
-    logging.info("\nTotal Tickers: %d", len(results))
+    logging.info("Total Tickers: %d", len(results))
     logging.info("✓ Successful: %d", len(successful))
     logging.info("⊘ Skipped: %d", len(skipped))
     logging.info("✗ Failed: %d", len(failed))
@@ -423,7 +423,7 @@ def print_summary(results: List[TickerResult]):
         logging.info("Average Runtime: %.2fs", avg_time)
 
     # Print table header
-    logging.info("\n%-10s %-10s %-12s %-50s", "Ticker", "Status", "Runtime", "Notes")
+    logging.info("%-10s %-10s %-12s %-50s", "Ticker", "Status", "Runtime", "Notes")
     logging.info("%s", "-" * 82)
 
     # Print each result
@@ -450,22 +450,22 @@ def print_summary(results: List[TickerResult]):
         logging.info("%-10s %s %-8s %-12s %s", result.ticker, status_icon, result.status, runtime_str, notes)
 
     if skipped:
-        logging.info("\n%s", "="*80)
+        logging.info("%s", "="*80)
         logging.info("SKIPPED TICKERS DETAILS")
         logging.info("%s", "="*80)
         for result in skipped:
-            logging.info("\n%s:", result.ticker)
+            logging.info("%s:", result.ticker)
             logging.info("  Reason: %s", result.error_message)
 
     if failed:
-        logging.info("\n%s", "="*80)
+        logging.info("%s", "="*80)
         logging.info("FAILED TICKERS DETAILS")
         logging.info("%s", "="*80)
         for result in failed:
-            logging.info("\n%s:", result.ticker)
+            logging.info("%s:", result.ticker)
             logging.info("  Error: %s", result.error_message)
 
-    logging.info("\n%s", "="*80)
+    logging.info("%s", "="*80)
 
 
 def print_detailed_results(results: List[TickerResult]):
@@ -478,35 +478,35 @@ def print_detailed_results(results: List[TickerResult]):
     successful = [r for r in results if r.status == "success"]
 
     if not successful:
-        logging.info("\nNo successful analyses to display.")
+        logging.info("No successful analyses to display.")
         return
 
     for result in successful:
-        logging.info("\n%s", "="*80)
+        logging.info("%s", "="*80)
         logging.info("DETAILED RESULTS: %s", result.ticker)
         logging.info("%s", "="*80)
 
         if result.final_trade_decision:
-            logging.info("\n📊 FINAL TRADE DECISION:")
+            logging.info("📊 FINAL TRADE DECISION:")
             logging.info("%s", "-" * 80)
             logging.info("%s", result.final_trade_decision)
 
         if result.indicator_report:
-            logging.info("\n📈 INDICATOR ANALYSIS:")
+            logging.info("📈 INDICATOR ANALYSIS:")
             logging.info("%s", "-" * 80)
             logging.info("%s", result.indicator_report)
 
         if result.pattern_report:
-            logging.info("\n🔍 PATTERN ANALYSIS:")
+            logging.info("🔍 PATTERN ANALYSIS:")
             logging.info("%s", "-" * 80)
             logging.info("%s", result.pattern_report)
 
         if result.trend_report:
-            logging.info("\n📉 TREND ANALYSIS:")
+            logging.info("📉 TREND ANALYSIS:")
             logging.info("%s", "-" * 80)
             logging.info("%s", result.trend_report)
 
-        logging.info("\n%s", "="*80)
+        logging.info("%s", "="*80)
 
 
 def save_results_json(results: List[TickerResult], output_path: Path, detailed: bool = False):
