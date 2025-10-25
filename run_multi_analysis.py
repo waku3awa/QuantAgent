@@ -642,15 +642,16 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
         logging.info("Results saved to: %s", output_path)
 
 
-def load_tickers_from_csv(file_path: str) -> List[str]:
+def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[str]:
     """
     Load tickers from CSV file filtering by signal column.
 
     Args:
         file_path: Path to CSV file
+        signal_filter: Signal filter ('buy', 'sell', or 'all'). Default: 'buy'
 
     Returns:
-        List of ticker symbols where シグナル is "買い" or "売り"
+        List of ticker symbols matching the signal filter
 
     CSV Format:
         ティッカー,銘柄名,シグナル,現在価格,100株価格,200日MA,MA比率(%),割高,割安,2日変動率(%),エラー
@@ -702,7 +703,15 @@ def load_tickers_from_csv(file_path: str) -> List[str]:
                         name = row.get(name_col, '').strip() if name_col else ''
 
                         # Filter by signal
-                        if signal in ('買い', '売り'):
+                        signal_matches = False
+                        if signal_filter == 'all':
+                            signal_matches = signal in ('買い', '売り')
+                        elif signal_filter == 'buy':
+                            signal_matches = signal == '買い'
+                        elif signal_filter == 'sell':
+                            signal_matches = signal == '売り'
+
+                        if signal_matches:
                             ticker = ticker_raw.upper()
                             if ticker and ticker not in seen:
                                 tickers.append(ticker)
@@ -752,8 +761,12 @@ Examples:
   # View detailed analysis with custom models
   python run_multi_analysis.py --tickers AAPL TSLA --provider openai --agent-model gpt-4o-mini --detailed
 
-  # Analyze from CSV file (filters by シグナル column: "買い" or "売り")
+  # Analyze from CSV file (default: filters by シグナル="買い")
   python run_multi_analysis.py --csv-file signals.csv --period 1y --interval 1d
+
+  # Analyze from CSV file with different signal filters
+  python run_multi_analysis.py --csv-file signals.csv --signal sell --period 1y
+  python run_multi_analysis.py --csv-file signals.csv --signal all --period 6mo
 
 Processing Notes:
   - Tickers are processed sequentially (one at a time)
@@ -778,10 +791,18 @@ Supported providers: openai (default), claude_api, claude_cli
     input_group.add_argument(
         "--csv-file",
         type=str,
-        help='Path to CSV file with "ティッカー" and "シグナル" columns. Only tickers with シグナル="買い" or "売り" will be analyzed.'
+        help='Path to CSV file with "ティッカー" and "シグナル" columns. Use --signal to filter by signal value.'
     )
 
     # Optional arguments
+    parser.add_argument(
+        "--signal",
+        type=str,
+        default="buy",
+        choices=["buy", "sell", "all"],
+        help="Signal filter for CSV file (default: buy). Options: buy, sell, all"
+    )
+
     parser.add_argument(
         "--interval",
         type=str,
@@ -879,8 +900,8 @@ Supported providers: openai (default), claude_api, claude_cli
     # Load tickers from CSV file or command line
     tickers = []
     if args.csv_file:
-        logging.info("Loading tickers from CSV file: %s", args.csv_file)
-        tickers = load_tickers_from_csv(args.csv_file)
+        logging.info("Loading tickers from CSV file: %s (filter: %s)", args.csv_file, args.signal)
+        tickers = load_tickers_from_csv(args.csv_file, signal_filter=args.signal)
     elif args.tickers:
         # Remove duplicates and empty strings from tickers
         seen = set()
