@@ -85,6 +85,7 @@ def configure_logging(
     logging.captureWarnings(True)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("yfinance").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     root._configured = True
 
