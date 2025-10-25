@@ -547,8 +547,12 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
                 # Skipped ticker: only include basic info and error message
                 simple_record = {
                     "ticker": r.ticker,
-                    "status": r.status,
                     "name": get_ticker_name(r.ticker, ticker_name_map),
+                    "decision": None,
+                    "forecast_horizon": None,
+                    "justification": None,
+                    "risk_reward_ratio": None,
+                    "status": r.status,
                     "error_message": r.error_message
                 }
             else:
@@ -557,12 +561,12 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
 
                 simple_record = {
                     "ticker": r.ticker,
-                    "status": r.status,
                     "name": get_ticker_name(r.ticker, ticker_name_map),
-                    "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
                     "decision": parsed_data.get("decision") if parsed_data else None,
+                    "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
                     "justification": parsed_data.get("justification") if parsed_data else None,
                     "risk_reward_ratio": parsed_data.get("risk_reward_ratio") if parsed_data else None,
+                    "status": r.status,
                 }
 
                 # Add error message if present
@@ -622,20 +626,20 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
             # Simple format: extract structured fields from Final Trade Decision
             if not append:
                 writer.writerow([
-                    'Ticker', 'Status', 'Name', 'Forecast Horizon', 'Decision', 'Justification', 'Risk/Reward Ratio', 'Error Message'
+                    'Ticker', 'Name', 'Decision', 'Forecast Horizon', 'Justification', 'Risk/Reward Ratio', 'Status', 'Error Message'
                 ])
 
             for r in results:
                 if r.status == "skipped":
-                    # Skipped ticker: only populate ticker, status, and error message
+                    # Skipped ticker: only populate ticker, name, status, and error message
                     writer.writerow([
                         r.ticker,
-                        r.status,
                         get_ticker_name(r.ticker, ticker_name_map),
-                        '',  # forecast_horizon
                         '',  # decision
+                        '',  # forecast_horizon
                         '',  # justification
                         '',  # risk_reward_ratio
+                        r.status,
                         r.error_message or ''
                     ])
                 else:
@@ -644,12 +648,12 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
 
                     writer.writerow([
                         r.ticker,
-                        r.status,
                         get_ticker_name(r.ticker, ticker_name_map),
-                        parsed_data.get("forecast_horizon") if parsed_data else '',
                         parsed_data.get("decision") if parsed_data else '',
+                        parsed_data.get("forecast_horizon") if parsed_data else '',
                         parsed_data.get("justification") if parsed_data else '',
                         parsed_data.get("risk_reward_ratio") if parsed_data else '',
+                        r.status,
                         r.error_message or ''
                     ])
 
