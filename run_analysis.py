@@ -4,6 +4,7 @@ Fetches stock data using yfinance_cache and runs TradingGraph analysis.
 """
 import argparse
 import sys
+import logging
 from typing import Optional, List
 import pandas as pd
 import yfinance_cache as yfc
@@ -14,6 +15,9 @@ from langchain_core.messages import BaseMessage
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Get module-specific logger
+logger = logging.getLogger(__name__)
 
 
 def fetch_stock_data(
@@ -37,7 +41,7 @@ def fetch_stock_data(
         DataFrame with OHLCV data
     """
     try:
-        print(f"Fetching data for {ticker}...")
+        logger.info("Fetching data for %s...", ticker)
 
         # Fetch data
         # Note: yfinance_cache handles caching and session management
@@ -94,13 +98,13 @@ def fetch_stock_data(
         df = df[required_columns]
         df['Datetime'] = pd.to_datetime(df['Datetime'])
 
-        print(f"Successfully fetched {len(df)} data points")
-        print(f"Date range: {df['Datetime'].min()} to {df['Datetime'].max()}")
+        logger.info("Successfully fetched %d data points", len(df))
+        logger.info("Date range: %s to %s", df['Datetime'].min(), df['Datetime'].max())
 
         return df
 
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        logger.error("Error fetching data: %s", e)
         sys.exit(1)
 
 
@@ -121,9 +125,9 @@ def prepare_data_for_analysis(df: pd.DataFrame, limit: int = 45) -> dict:
     MINIMUM_DATA_POINTS = 50
 
     if len(df) < MINIMUM_DATA_POINTS:
-        print(f"\n⚠️  WARNING: Only {len(df)} data points available.")
-        print(f"   Technical indicators (especially MACD) require at least {MINIMUM_DATA_POINTS} data points for accurate calculations.")
-        print(f"   Results may be incomplete or inaccurate. Consider using a longer period (e.g., --period 3mo or 6mo).\n")
+        logger.warning("Only %d data points available.", len(df))
+        logger.warning("Technical indicators (especially MACD) require at least %d data points for accurate calculations.", MINIMUM_DATA_POINTS)
+        logger.warning("Results may be incomplete or inaccurate. Consider using a longer period (e.g., --period 3mo or 6mo).")
 
     # Get the most recent data points
     if len(df) > limit + 3:
@@ -189,7 +193,7 @@ def run_analysis(
     Returns:
         Analysis results
     """
-    print(f"\nRunning analysis with provider: {provider}...")
+    logger.info("Running analysis with provider: %s...", provider)
 
     # Create initial state with explicit type
     messages: List[BaseMessage] = []
@@ -213,7 +217,7 @@ def run_analysis(
         final_state = trading_graph.graph.invoke(initial_state)
         return final_state
     except Exception as e:
-        print(f"Error during analysis: {e}")
+        logger.error("Error during analysis: %s", e)
         sys.exit(1)
 
 
@@ -257,6 +261,18 @@ def print_results(final_state: dict):
 
 def main():
     """Main function."""
+    # Configure basic logging for standalone execution
+    # (run_multi_analysis.py will configure its own logging)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        # Quiet down noisy third-party libraries
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("yfinance").setLevel(logging.WARNING)
+
     parser = argparse.ArgumentParser(
         description="QuantAgent CLI: Analyze stock data using multi-agent trading system",
         formatter_class=argparse.RawDescriptionHelpFormatter,
