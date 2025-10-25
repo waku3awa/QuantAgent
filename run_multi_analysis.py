@@ -220,23 +220,28 @@ def parse_final_trade_decision(raw_text: str) -> Tuple[Optional[Dict[str, Any]],
         return None, f"json_decode_error: {e.msg}"
 
 
-def get_ticker_name(ticker: str) -> str:
+def get_ticker_name(ticker: str, csv_name_map: Optional[Dict[str, str]] = None) -> str:
     """
-    Get ticker name from yfinance with caching.
+    Get ticker name, preferring CSV name over yfinance.
 
     Args:
         ticker: Ticker symbol
+        csv_name_map: Optional mapping from ticker to name from CSV file
 
     Returns:
-        Ticker name (longName or shortName), or ticker symbol if not found
+        Ticker name from CSV, yfinance (longName or shortName), or ticker symbol if not found
     """
     ticker_upper = ticker.upper()
 
-    # Check cache first
+    # Check CSV mapping first (highest priority)
+    if csv_name_map and ticker_upper in csv_name_map:
+        return csv_name_map[ticker_upper]
+
+    # Check cache second
     if ticker_upper in _ticker_name_cache:
         return _ticker_name_cache[ticker_upper]
 
-    # Fetch from yfinance
+    # Fetch from yfinance as fallback
     try:
         ticker_obj = yf.Ticker(ticker_upper)
         info = ticker_obj.info
@@ -251,6 +256,14 @@ def get_ticker_name(ticker: str) -> str:
         # Cache the ticker symbol itself to avoid repeated failures
         _ticker_name_cache[ticker_upper] = ticker_upper
         return ticker_upper
+
+
+@dataclass
+class TickerInfo:
+    """Ticker information from CSV file."""
+    ticker: str
+    name: str
+    signal: str  # '買い' or '売り'
 
 
 @dataclass
@@ -510,7 +523,7 @@ def print_detailed_results(results: List[TickerResult]):
         logging.info("%s", "="*80)
 
 
-def save_results_json(results: List[TickerResult], output_path: Path, detailed: bool = False):
+def save_results_json(results: List[TickerResult], output_path: Path, detailed: bool = False, ticker_name_map: Optional[Dict[str, str]] = None):
     """
     Save results to JSON file.
 
@@ -518,6 +531,7 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
         results: List of TickerResult objects
         output_path: Output file Path object
         detailed: If True, save detailed format. If False, save simple format (default).
+        ticker_name_map: Optional mapping from ticker to name from CSV file
     """
     # Create parent directories if they don't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -534,7 +548,7 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
                 simple_record = {
                     "ticker": r.ticker,
                     "status": r.status,
-                    "name": get_ticker_name(r.ticker),
+                    "name": get_ticker_name(r.ticker, ticker_name_map),
                     "error_message": r.error_message
                 }
             else:
@@ -544,7 +558,7 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
                 simple_record = {
                     "ticker": r.ticker,
                     "status": r.status,
-                    "name": get_ticker_name(r.ticker),
+                    "name": get_ticker_name(r.ticker, ticker_name_map),
                     "forecast_horizon": parsed_data.get("forecast_horizon") if parsed_data else None,
                     "decision": parsed_data.get("decision") if parsed_data else None,
                     "justification": parsed_data.get("justification") if parsed_data else None,
@@ -567,7 +581,7 @@ def save_results_json(results: List[TickerResult], output_path: Path, detailed: 
     logging.info("Results saved to: %s", output_path)
 
 
-def save_results_csv(results: List[TickerResult], output_path: Path, append: bool = False, detailed: bool = False):
+def save_results_csv(results: List[TickerResult], output_path: Path, append: bool = False, detailed: bool = False, ticker_name_map: Optional[Dict[str, str]] = None):
     """
     Save results to CSV file.
 
@@ -576,6 +590,7 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
         output_path: Output file Path object
         append: If True, append to existing file without header. If False, create new file with header.
         detailed: If True, save detailed format. If False, save simple format (default).
+        ticker_name_map: Optional mapping from ticker to name from CSV file
     """
     # Create parent directories if they don't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -616,7 +631,7 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
                     writer.writerow([
                         r.ticker,
                         r.status,
-                        get_ticker_name(r.ticker),
+                        get_ticker_name(r.ticker, ticker_name_map),
                         '',  # forecast_horizon
                         '',  # decision
                         '',  # justification
@@ -630,7 +645,7 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
                     writer.writerow([
                         r.ticker,
                         r.status,
-                        get_ticker_name(r.ticker),
+                        get_ticker_name(r.ticker, ticker_name_map),
                         parsed_data.get("forecast_horizon") if parsed_data else '',
                         parsed_data.get("decision") if parsed_data else '',
                         parsed_data.get("justification") if parsed_data else '',
@@ -642,7 +657,7 @@ def save_results_csv(results: List[TickerResult], output_path: Path, append: boo
         logging.info("Results saved to: %s", output_path)
 
 
-def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[str]:
+def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[TickerInfo]:
     """
     Load tickers from CSV file filtering by signal column.
 
@@ -651,7 +666,7 @@ def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[st
         signal_filter: Signal filter ('buy', 'sell', or 'all'). Default: 'buy'
 
     Returns:
-        List of ticker symbols matching the signal filter
+        List of TickerInfo objects matching the signal filter
 
     CSV Format:
         ティッカー,銘柄名,シグナル,現在価格,100株価格,200日MA,MA比率(%),割高,割安,2日変動率(%),エラー
@@ -661,7 +676,7 @@ def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[st
         logging.error("✗ Error: CSV file not found: %s", file_path)
         sys.exit(1)
 
-    tickers = []
+    ticker_infos = []
     seen = set()
 
     # Try UTF-8 first, then CP932 (Shift_JIS for Japanese Windows)
@@ -714,7 +729,12 @@ def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[st
                         if signal_matches:
                             ticker = ticker_raw.upper()
                             if ticker and ticker not in seen:
-                                tickers.append(ticker)
+                                ticker_info = TickerInfo(
+                                    ticker=ticker,
+                                    name=name or ticker,
+                                    signal=signal
+                                )
+                                ticker_infos.append(ticker_info)
                                 seen.add(ticker)
                                 # Display ticker with name if available
                                 if name:
@@ -726,8 +746,8 @@ def load_tickers_from_csv(file_path: str, signal_filter: str = 'buy') -> List[st
                         continue
 
             # Success - exit encoding loop
-            logging.info("✓ Loaded %d ticker(s) from CSV (encoding: %s)", len(tickers), encoding)
-            return tickers
+            logging.info("✓ Loaded %d ticker(s) from CSV (encoding: %s)", len(ticker_infos), encoding)
+            return ticker_infos
 
         except UnicodeDecodeError as e:
             last_error = e
@@ -898,22 +918,27 @@ Supported providers: openai (default), claude_api, claude_cli
     configure_logging()
 
     # Load tickers from CSV file or command line
-    tickers = []
+    ticker_infos = []
+    ticker_name_map = {}  # Map ticker symbol to name
+
     if args.csv_file:
         logging.info("Loading tickers from CSV file: %s (filter: %s)", args.csv_file, args.signal)
-        tickers = load_tickers_from_csv(args.csv_file, signal_filter=args.signal)
+        ticker_infos = load_tickers_from_csv(args.csv_file, signal_filter=args.signal)
+        # Build ticker -> name mapping from CSV
+        ticker_name_map = {info.ticker: info.name for info in ticker_infos}
     elif args.tickers:
         # Remove duplicates and empty strings from tickers
         seen = set()
         for ticker in args.tickers:
             ticker = ticker.strip().upper()
             if ticker and ticker not in seen:
-                tickers.append(ticker)
+                ticker_infos.append(TickerInfo(ticker=ticker, name=ticker, signal=''))
                 seen.add(ticker)
 
-    if not tickers:
+    if not ticker_infos:
         parser.error("No valid tickers to analyze. Check your input source (CSV or --tickers).")
 
+    tickers = [info.ticker for info in ticker_infos]
     logging.info("Starting analysis for %d ticker(s): %s", len(tickers), ', '.join(tickers))
     logging.info("Provider: %s", args.provider)
     logging.info("Processing mode: Sequential")
@@ -952,7 +977,7 @@ Supported providers: openai (default), claude_api, claude_cli
 
         # Initialize CSV file with header if CSV format
         if output_format == 'csv':
-            save_results_csv([], output_path, append=False, detailed=args.detailed_output)
+            save_results_csv([], output_path, append=False, detailed=args.detailed_output, ticker_name_map=ticker_name_map)
 
     # Process tickers sequentially
     for ticker in tickers:
@@ -971,7 +996,7 @@ Supported providers: openai (default), claude_api, claude_cli
 
         # Immediately write to CSV if output is CSV format
         if output_path and output_format == 'csv':
-            save_results_csv([result], output_path, append=True, detailed=args.detailed_output)
+            save_results_csv([result], output_path, append=True, detailed=args.detailed_output, ticker_name_map=ticker_name_map)
 
     total_time = time.perf_counter() - start_time
 
@@ -987,7 +1012,7 @@ Supported providers: openai (default), claude_api, claude_cli
     if args.output:
         # Only save JSON format here; CSV was already written incrementally
         if output_format == 'json':
-            save_results_json(results, output_path, detailed=args.detailed_output)
+            save_results_json(results, output_path, detailed=args.detailed_output, ticker_name_map=ticker_name_map)
         elif output_format == 'csv':
             # CSV already written incrementally during processing
             logging.info("Results saved to: %s", output_path)
