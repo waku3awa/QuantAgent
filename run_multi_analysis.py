@@ -302,7 +302,7 @@ def process_single_ticker(
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
         limit: Number of most recent data points to analyze
-        provider: LLM provider ("openai", "claude_api", "claude_cli")
+        provider: LLM provider ("openai", "claude_api", "claude_cli", "ollama")
         agent_model: Model name for agent LLMs (optional)
         graph_model: Model name for graph LLM (optional)
 
@@ -801,7 +801,7 @@ Processing Notes:
 
 Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d
 Supported periods: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max
-Supported providers: openai (default), claude_api, claude_cli
+Supported providers: openai (default), claude_api, claude_cli, ollama
         """
     )
 
@@ -894,7 +894,7 @@ Supported providers: openai (default), claude_api, claude_cli
         "--provider",
         type=str,
         default="openai",
-        choices=["openai", "claude_api", "claude_cli"],
+        choices=["openai", "claude_api", "claude_cli", "ollama"],
         help="LLM provider to use (default: openai)"
     )
 

@@ -8,6 +8,7 @@ scipy
 TA-Lib
 langchain
 langchain-openai
+langchain-ollama
 langchain-core
 langgraph
 openai

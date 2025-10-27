@@ -5,6 +5,7 @@ Supports:
 - OpenAI (via ChatOpenAI)
 - Anthropic Claude API (via ChatAnthropic)
 - Claude CLI (via ChatClaudeCLI custom wrapper)
+- Ollama (via ChatOllama)
 """
 
 from typing import Optional, Dict, Any
@@ -21,13 +22,13 @@ def get_chat_model(
     Factory function to create a chat model instance based on provider.
 
     Args:
-        provider: Provider name ("openai", "claude_api", "claude_cli")
+        provider: Provider name ("openai", "claude_api", "claude_cli", "ollama")
         model: Model name (provider-specific, uses default if None)
         temperature: Temperature setting for the model
         **kwargs: Additional provider-specific parameters
 
     Returns:
-        Chat model instance (ChatOpenAI, ChatAnthropic, or ChatClaudeCLI)
+        Chat model instance (ChatOpenAI, ChatAnthropic, ChatClaudeCLI, or ChatOllama)
 
     Raises:
         ValueError: If provider is not supported
@@ -42,6 +43,9 @@ def get_chat_model(
 
         >>> # Use Claude CLI
         >>> llm = get_chat_model("claude_cli", temperature=0.7)
+
+        >>> # Use Ollama
+        >>> llm = get_chat_model("ollama", model="gemma3:12b")
     """
     provider = provider.lower()
 
@@ -83,10 +87,31 @@ def get_chat_model(
             timeout=kwargs.get("timeout", 60.0)
         )
 
+    elif provider == "ollama":
+        try:
+            from langchain_ollama import ChatOllama
+        except ImportError:
+            raise ImportError(
+                "langchain-ollama is required for Ollama. "
+                "Install it with: pip install langchain-ollama"
+            )
+
+        model_name = model or kwargs.get("ollama_model", "gemma3:12b")
+        base_url = kwargs.get("ollama_base_url", "http://localhost:11434")
+        num_predict = kwargs.get("num_predict", 512)
+
+        return ChatOllama(
+            model=model_name,
+            temperature=temperature,
+            base_url=base_url,
+            num_predict=num_predict,
+            **{k: v for k, v in kwargs.items() if k not in ["ollama_model", "ollama_base_url", "num_predict"]}
+        )
+
     else:
         raise ValueError(
             f"Unsupported provider: {provider}. "
-            f"Supported providers: openai, claude_api, claude_cli"
+            f"Supported providers: openai, claude_api, claude_cli, ollama"
         )
 
 
@@ -124,6 +149,12 @@ def get_provider_config(provider: str) -> Dict[str, Any]:
             "supports_vision": True,
             "supports_tools": False,  # CLI wrapper doesn't support tools directly
         },
+        "ollama": {
+            "default_model": "gemma3:12b",
+            "default_temperature": 0.1,
+            "supports_vision": False,  # Vision support depends on model (e.g., llava)
+            "supports_tools": True,  # Tool support depends on model
+        },
     }
 
     provider = provider.lower()
@@ -147,6 +178,11 @@ def create_claude_api_model(model: str = "claude-3-5-sonnet-20241022", temperatu
 def create_claude_cli_model(temperature: float = 0.1, timeout: float = 60.0, **kwargs):
     """Create a Claude CLI chat model."""
     return get_chat_model("claude_cli", temperature=temperature, timeout=timeout, **kwargs)
+
+
+def create_ollama_model(model: str = "gemma3:12b", temperature: float = 0.1, base_url: str = "http://localhost:11434", **kwargs):
+    """Create an Ollama chat model."""
+    return get_chat_model("ollama", model=model, temperature=temperature, ollama_base_url=base_url, **kwargs)
 
 
 if __name__ == "__main__":
@@ -177,8 +213,16 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"   Error: {e}")
 
+    # Test Ollama
+    print("\n4. Creating Ollama model...")
+    try:
+        llm_ollama = get_chat_model("ollama")
+        print(f"   Created: {llm_ollama._llm_type}")
+    except Exception as e:
+        print(f"   Error: {e}")
+
     # Test provider config
-    print("\n4. Getting provider configs...")
-    for provider in ["openai", "claude_api", "claude_cli"]:
+    print("\n5. Getting provider configs...")
+    for provider in ["openai", "claude_api", "claude_cli", "ollama"]:
         config = get_provider_config(provider)
         print(f"   {provider}: {config['default_model']}")
