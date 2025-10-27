@@ -96,7 +96,12 @@ def get_chat_model(
                 "Install it with: pip install langchain-ollama"
             )
 
-        model_name = model or kwargs.get("ollama_model", "gemma3:12b")
+        # If model is specified but it's an OpenAI model name, use default Ollama model
+        if model and model.startswith("gpt-"):
+            model_name = kwargs.get("ollama_model", "gemma3:12b")
+        else:
+            model_name = model or kwargs.get("ollama_model", "gemma3:12b")
+
         base_url = kwargs.get("ollama_base_url", "http://localhost:11434")
         num_predict = kwargs.get("num_predict", 512)
 
