@@ -8,4 +8,6 @@ DEFAULT_CONFIG = {
     # Ollama settings
     "ollama_model": "gemma3:12b",
     "ollama_base_url": "http://localhost:11434",
+    # OpenAI Compatible API settings (read from environment variables)
+    # Set OPENAI_COMPATIBLE_BASE_URL, OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_MODEL
 }

@@ -3,7 +3,6 @@ TradingGraph: Orchestrates the multi-agent trading system using LangChain and La
 Initializes LLMs, toolkits, and agent nodes for indicator, pattern, and trend analysis.
 """
 from typing import Dict, Optional
-from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import ToolNode
 from default_config import DEFAULT_CONFIG
 from graph_util import TechnicalTools
@@ -81,10 +80,10 @@ class TradingGraph:
             self.tool_nodes,
             self.config,
         )
-        
+
         # --- The main LangGraph graph object ---
         self.graph = self.graph_setup.set_graph()
-    
+
     def _set_tool_nodes(self) -> Dict[str, ToolNode]:
         """
         Define tool nodes for each agent type (indicator, pattern, trend).
@@ -110,7 +109,7 @@ class TradingGraph:
                 ]
             )
         }
-    
+
     def refresh_llms(self, provider: Optional[str] = None):
         """
         Refresh the LLM objects with the current API key from environment.

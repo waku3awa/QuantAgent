@@ -6,8 +6,10 @@ Supports:
 - Anthropic Claude API (via ChatAnthropic)
 - Claude CLI (via ChatClaudeCLI custom wrapper)
 - Ollama (via ChatOllama)
+- OpenAI Compatible API servers (via ChatOpenAI with custom base_url)
 """
 
+import os
 from typing import Optional, Dict, Any
 from langchain_openai import ChatOpenAI
 
@@ -22,7 +24,7 @@ def get_chat_model(
     Factory function to create a chat model instance based on provider.
 
     Args:
-        provider: Provider name ("openai", "claude_api", "claude_cli", "ollama")
+        provider: Provider name ("openai", "claude_api", "claude_cli", "ollama", "openai_compatible")
         model: Model name (provider-specific, uses default if None)
         temperature: Temperature setting for the model
         **kwargs: Additional provider-specific parameters
@@ -46,6 +48,9 @@ def get_chat_model(
 
         >>> # Use Ollama
         >>> llm = get_chat_model("ollama", model="gemma3:12b")
+
+        >>> # Use OpenAI Compatible API
+        >>> llm = get_chat_model("openai_compatible", model="my-model")
     """
     provider = provider.lower()
 
@@ -113,10 +118,38 @@ def get_chat_model(
             **{k: v for k, v in kwargs.items() if k not in ["ollama_model", "ollama_base_url", "num_predict"]}
         )
 
+    elif provider == "openai_compatible":
+        # Read from environment variables
+        base_url = os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
+        api_key = os.environ.get("OPENAI_COMPATIBLE_API_KEY", "EMPTY")
+
+        if not base_url:
+            raise ValueError(
+                "OPENAI_COMPATIBLE_BASE_URL environment variable is required for openai_compatible provider. "
+                "Example: export OPENAI_COMPATIBLE_BASE_URL=http://localhost:8000/v1"
+            )
+
+        # Model can be specified via parameter, kwarg, or environment variable
+        model_name = model or kwargs.get("openai_compatible_model") or os.environ.get("OPENAI_COMPATIBLE_MODEL")
+
+        if not model_name:
+            raise ValueError(
+                "Model name must be specified via parameter, openai_compatible_model kwarg, "
+                "or OPENAI_COMPATIBLE_MODEL environment variable"
+            )
+
+        return ChatOpenAI(
+            model=model_name,
+            base_url=base_url,
+            api_key=api_key,
+            temperature=temperature,
+            **{k: v for k, v in kwargs.items() if k not in ["openai_compatible_model"]}
+        )
+
     else:
         raise ValueError(
             f"Unsupported provider: {provider}. "
-            f"Supported providers: openai, claude_api, claude_cli, ollama"
+            f"Supported providers: openai, claude_api, claude_cli, ollama, openai_compatible"
         )
 
 
@@ -160,6 +193,12 @@ def get_provider_config(provider: str) -> Dict[str, Any]:
             "supports_vision": False,  # Vision support depends on model (e.g., llava)
             "supports_tools": True,  # Tool support depends on model
         },
+        "openai_compatible": {
+            "default_model": None,  # Must be specified via environment variable or parameter
+            "default_temperature": 0.1,
+            "supports_vision": False,  # Depends on the server implementation
+            "supports_tools": False,  # Depends on the server implementation
+        },
     }
 
     provider = provider.lower()
@@ -188,6 +227,18 @@ def create_claude_cli_model(temperature: float = 0.1, timeout: float = 60.0, **k
 def create_ollama_model(model: str = "gemma3:12b", temperature: float = 0.1, base_url: str = "http://localhost:11434", **kwargs):
     """Create an Ollama chat model."""
     return get_chat_model("ollama", model=model, temperature=temperature, ollama_base_url=base_url, **kwargs)
+
+
+def create_openai_compatible_model(model: Optional[str] = None, temperature: float = 0.1, **kwargs):
+    """
+    Create an OpenAI Compatible API chat model.
+
+    Requires environment variables:
+    - OPENAI_COMPATIBLE_BASE_URL: The API endpoint (e.g., http://localhost:8000/v1)
+    - OPENAI_COMPATIBLE_API_KEY: The API key (optional, defaults to "EMPTY")
+    - OPENAI_COMPATIBLE_MODEL: The model name (optional if specified as parameter)
+    """
+    return get_chat_model("openai_compatible", model=model, temperature=temperature, **kwargs)
 
 
 if __name__ == "__main__":
@@ -226,8 +277,16 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"   Error: {e}")
 
+    # Test OpenAI Compatible
+    print("\n5. Creating OpenAI Compatible model...")
+    try:
+        llm_compatible = get_chat_model("openai_compatible")
+        print(f"   Created: {llm_compatible._llm_type}")
+    except Exception as e:
+        print(f"   Error: {e}")
+
     # Test provider config
-    print("\n5. Getting provider configs...")
-    for provider in ["openai", "claude_api", "claude_cli", "ollama"]:
+    print("\n6. Getting provider configs...")
+    for provider in ["openai", "claude_api", "claude_cli", "ollama", "openai_compatible"]:
         config = get_provider_config(provider)
         print(f"   {provider}: {config['default_model']}")
